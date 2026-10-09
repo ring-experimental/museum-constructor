@@ -1,0 +1,8 @@
+node_modules
+dist
+*.log
+*.local
+.DS_Store
+tools/blender/__pycache__
+# 미리보기 렌더는 tools/blender/render_previews.py 로 재생성
+tools/blender/previews/

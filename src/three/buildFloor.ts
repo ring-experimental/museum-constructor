@@ -1,0 +1,509 @@
+import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { CELL, FRAME_STYLE_SPEC, PROP_SPEC, WALL_THICKNESS } from '../core/constants';
+import { buildColliders, type Colliders } from '../core/collision';
+import { computeWallEdges, facingCell, isFaceValid, isFilled, mergeWallRuns, wallItemPose, type FacePose } from '../core/grid';
+import type { Artwork, Exhibition, Floor, FrameItem, FrameStyle, PropType, WallSide } from '../core/types';
+import { acquireArtworkTexture, fitTextureToAspect, releaseArtworkTexture } from './artworkTextures';
+import { frameDims, imageGeometry, matGeometry, moldingGeometry, panelGeometry, type FrameDims } from './frameGeometry';
+import { acquireCaptionTexture, floorIndicatorTexture, releaseCaptionTexture } from './labels';
+import { LIGHTING } from './lighting';
+import { getLoadedModel, instanceModel, loadModel, type ModelName } from './models';
+import { aoStripTexture, contactShadowTexture, statusTexture, wallWashTexture } from './proceduralTextures';
+import { applyTextureSet, createFloorMaterial, createWallMaterial, floorSetFor, TEXTURE_TILE } from './surfaceMaterials';
+
+export interface BuildOptions {
+  mode: 'visit' | 'preview';
+  /** 미리보기에서 강조할 항목 */
+  selectedId?: string | null;
+  /** 텍스처 로드 등 비동기 변화가 생겼을 때 (on-demand 렌더링용) */
+  onChange?: () => void;
+}
+
+export interface FrameInfo {
+  id: string;
+  item: FrameItem;
+  artwork: Artwork | null;
+  pose: FacePose;
+  center: THREE.Vector3;
+  dims: FrameDims;
+}
+
+export interface ElevatorInfo {
+  id: string;
+  pose: FacePose;
+  center: THREE.Vector3;
+  doorL: THREE.Object3D | null;
+  doorR: THREE.Object3D | null;
+  doorBase: [number, number];
+  root: THREE.Object3D;
+}
+
+export interface FloorScene {
+  group: THREE.Group;
+  frames: FrameInfo[];
+  elevators: ElevatorInfo[];
+  pickables: THREE.Object3D[];
+  floorMesh: THREE.Mesh;
+  colliders: Colliders;
+  dispose(): void;
+}
+
+/** 박스류 지오메트리에 면 방향 기준 월드 UV 부여 (타일 텍스처용) */
+function applyWorldUV(g: THREE.BufferGeometry, tile: number) {
+  const pos = g.getAttribute('position');
+  const nor = g.getAttribute('normal');
+  const uv = new Float32Array(pos.count * 2);
+  for (let k = 0; k < pos.count; k++) {
+    const x = pos.getX(k);
+    const y = pos.getY(k);
+    const z = pos.getZ(k);
+    const nx = Math.abs(nor.getX(k));
+    const ny = Math.abs(nor.getY(k));
+    let u: number;
+    let v: number;
+    if (ny > 0.5) {
+      u = x;
+      v = z;
+    } else if (nx > 0.5) {
+      u = z;
+      v = y;
+    } else {
+      u = x;
+      v = y;
+    }
+    uv[k * 2] = u / tile;
+    uv[k * 2 + 1] = v / tile;
+  }
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+}
+
+function quadsGeometry(quads: number[][], up: boolean, tile: number) {
+  // quads: [x0, z0, x1, z1, y]
+  const pos: number[] = [];
+  const uv: number[] = [];
+  for (const [x0, z0, x1, z1, y] of quads) {
+    const tri = up
+      ? [x0, z0, x0, z1, x1, z1, x0, z0, x1, z1, x1, z0]
+      : [x0, z0, x1, z1, x0, z1, x0, z0, x1, z0, x1, z1];
+    for (let k = 0; k < 6; k++) {
+      pos.push(tri[k * 2], y, tri[k * 2 + 1]);
+      uv.push(tri[k * 2] / tile, -tri[k * 2 + 1] / tile);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.computeVertexNormals();
+  return g;
+}
+
+function merge(list: THREE.BufferGeometry[]): THREE.BufferGeometry | null {
+  if (!list.length) return null;
+  const nonIndexed = list.map((g) => (g.index ? g.toNonIndexed() : g));
+  const merged = mergeGeometries(nonIndexed, false);
+  list.forEach((g) => g.dispose());
+  nonIndexed.forEach((g) => g.dispose());
+  return merged;
+}
+
+function darken(hex: string, f: number) {
+  const c = new THREE.Color(hex);
+  c.multiplyScalar(f);
+  return `#${c.getHexString()}`;
+}
+
+const PROP_MODEL: Record<PropType, ModelName> = { bench: 'bench', plant: 'plant', pedestal: 'pedestal' };
+
+export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildOptions): FloorScene {
+  const floor: Floor = ex.floors[floorIndex];
+  const preset = LIGHTING[ex.theme.lighting];
+  const group = new THREE.Group();
+  group.name = `floor:${floor.name}`;
+  let disposed = false;
+  const cleanups: (() => void)[] = [];
+  const changed = () => !disposed && opts.onChange?.();
+
+  const H = floor.wallHeight;
+  const T = WALL_THICKNESS;
+  const parts = new Set(floor.partitions);
+  const edges = computeWallEdges(floor);
+  const runs = mergeWallRuns(edges);
+
+  // ── 바닥 / 천장 ─────────────────────────────────────────
+  const floorQuads: number[][] = [];
+  const ceilQuads: number[][] = [];
+  const panelQuads: number[][] = [];
+  // 선형 조명 슬롯 (칸마다 x 방향으로 이어지는 띠)
+  for (let j = 0; j < floor.rows; j++) {
+    for (let i = 0; i < floor.cols; i++) {
+      if (!isFilled(floor, i, j)) continue;
+      const x0 = i * CELL;
+      const z0 = j * CELL;
+      floorQuads.push([x0, z0, x0 + CELL, z0 + CELL, 0]);
+      ceilQuads.push([x0, z0, x0 + CELL, z0 + CELL, H]);
+      panelQuads.push([x0, z0 + CELL / 2 - 0.09, x0 + CELL, z0 + CELL / 2 + 0.09, H - 0.01]);
+    }
+  }
+  const floorMat = createFloorMaterial(ex.theme.floorStyle);
+  const floorMesh = new THREE.Mesh(quadsGeometry(floorQuads, true, TEXTURE_TILE[floorSetFor(ex.theme.floorStyle)]), floorMat);
+  floorMesh.name = 'floor';
+  floorMesh.userData.kind = 'floor';
+  group.add(floorMesh);
+
+  if (opts.mode === 'visit') {
+    const ceil = new THREE.Mesh(quadsGeometry(ceilQuads, false, 2), new THREE.MeshStandardMaterial({ color: '#f5f4f1', roughness: 0.95 }));
+    ceil.name = 'ceiling';
+    group.add(ceil);
+    const panels = new THREE.Mesh(quadsGeometry(panelQuads, false, 2), new THREE.MeshBasicMaterial({ color: preset.ceilingPanel }));
+    panels.name = 'ceiling-panels';
+    group.add(panels);
+  }
+
+  // ── 벽 / 걸레받이 ──────────────────────────────────────
+  const wallGeos: THREE.BufferGeometry[] = [];
+  const baseGeos: THREE.BufferGeometry[] = [];
+  const wallH = H;
+  for (const r of runs) {
+    const len = Math.hypot(r.x2 - r.x1, r.z2 - r.z1);
+    const cx = (r.x1 + r.x2) / 2;
+    const cz = (r.z1 + r.z2) / 2;
+    const horizontal = r.dir === 'h';
+    const w = new THREE.BoxGeometry(horizontal ? len + T : T, wallH, horizontal ? T : len + T);
+    w.translate(cx, wallH / 2, cz);
+    wallGeos.push(w);
+    const bh = 0.09;
+    const b = new THREE.BoxGeometry(horizontal ? len + T + 0.024 : T + 0.024, bh, horizontal ? T + 0.024 : len + T + 0.024);
+    b.translate(cx, bh / 2, cz);
+    baseGeos.push(b);
+  }
+  const wallGeo = merge(wallGeos);
+  if (wallGeo) {
+    applyWorldUV(wallGeo, TEXTURE_TILE.wall_plaster);
+    const walls = new THREE.Mesh(wallGeo, createWallMaterial(ex.theme.wallColor));
+    walls.name = 'walls';
+    walls.userData.kind = 'wall';
+    group.add(walls);
+  }
+  const baseGeo = merge(baseGeos);
+  if (baseGeo) {
+    const base = new THREE.Mesh(baseGeo, new THREE.MeshStandardMaterial({ color: darken(ex.theme.wallColor, 0.78), roughness: 0.7 }));
+    base.name = 'baseboards';
+    group.add(base);
+  }
+
+  // ── 벽-바닥 AO 띠 ──────────────────────────────────────
+  const aoGeos: THREE.BufferGeometry[] = [];
+  const AO_W = 0.55;
+  for (const e of edges) {
+    for (const side of [1, -1] as WallSide[]) {
+      const [ci, cj] = facingCell({ edge: e.key, side });
+      if (!isFilled(floor, ci, cj)) continue;
+      const g = new THREE.PlaneGeometry(CELL, AO_W);
+      // Plane: XY → 바닥(XZ)으로 눕히고 v=1(위쪽)이 벽 쪽이 되게
+      g.rotateX(-Math.PI / 2); // v=1 쪽이 로컬 -Z
+      g.translate(0, 0, AO_W / 2); // v=1 이 z=0(벽면), 방 안쪽(+Z)으로 펼침
+      const pose = wallItemPose({ id: '', kind: 'elevator', edge: e.key, side, offset: 0 });
+      g.rotateY(pose.rotY);
+      g.translate(pose.x, 0.004, pose.z);
+      aoGeos.push(g);
+    }
+  }
+  const aoGeo = merge(aoGeos);
+  if (aoGeo) {
+    // 캔버스 위쪽(진한 쪽)이 v=1 → 벽 쪽
+    const ao = new THREE.Mesh(
+      aoGeo,
+      new THREE.MeshBasicMaterial({ map: aoStripTexture(), transparent: true, depthWrite: false, opacity: opts.mode === 'visit' ? 1 : 0.7 }),
+    );
+    ao.renderOrder = 1;
+    ao.name = 'ao';
+    group.add(ao);
+  }
+
+  // ── 액자 ───────────────────────────────────────────────
+  const frames: FrameInfo[] = [];
+  const pickables: THREE.Object3D[] = [];
+  const moldingByStyle = new Map<FrameStyle, THREE.BufferGeometry[]>();
+  const matGeos: THREE.BufferGeometry[] = [];
+  const washGeos: THREE.BufferGeometry[] = [];
+  const lightMatrices: THREE.Matrix4[] = [];
+  const artMap = new Map(ex.artworks.map((a) => [a.id, a]));
+  const selectionBoxes: THREE.Object3D[] = [];
+
+  for (const it of floor.wallItems) {
+    if (it.kind !== 'frame') continue;
+    if (!isFaceValid(floor, it, parts)) continue;
+    const art = it.artworkId ? (artMap.get(it.artworkId) ?? null) : null;
+    if (!art && opts.mode === 'visit') continue;
+    const aspect = art ? art.width / Math.max(1, art.height) : 4 / 3;
+    const imageW = it.width;
+    const imageH = it.width / aspect;
+    const d = frameDims(it.frameStyle, imageW, imageH, it.mat);
+    const pose = wallItemPose(it);
+    const M = new THREE.Matrix4().compose(
+      new THREE.Vector3(pose.x, it.elevation, pose.z),
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), pose.rotY),
+      new THREE.Vector3(1, 1, 1),
+    );
+
+    if (it.frameStyle === 'none') {
+      const g = panelGeometry(d);
+      g.applyMatrix4(M);
+      if (!moldingByStyle.has('none')) moldingByStyle.set('none', []);
+      moldingByStyle.get('none')!.push(g);
+    } else {
+      const g = moldingGeometry(d);
+      g.applyMatrix4(M);
+      if (!moldingByStyle.has(it.frameStyle)) moldingByStyle.set(it.frameStyle, []);
+      moldingByStyle.get(it.frameStyle)!.push(g);
+      const mg = matGeometry(d);
+      mg.applyMatrix4(M);
+      matGeos.push(mg);
+    }
+
+    // 작품 이미지
+    const imgMat = new THREE.MeshBasicMaterial({ map: statusTexture(art ? 'loading' : 'empty'), toneMapped: false });
+    const img = new THREE.Mesh(imageGeometry(d), imgMat);
+    img.applyMatrix4(M);
+    img.userData = { kind: 'frame', id: it.id };
+    group.add(img);
+    pickables.push(img);
+    if (art) {
+      const src = art.source;
+      acquireArtworkTexture(src)
+        .then((tex) => {
+          if (disposed) {
+            releaseArtworkTexture(src);
+            return;
+          }
+          const fitted = fitTextureToAspect(tex, imageW / imageH);
+          imgMat.map = fitted;
+          imgMat.needsUpdate = true;
+          cleanups.push(() => {
+            if (fitted !== tex) fitted.dispose();
+            releaseArtworkTexture(src);
+          });
+          changed();
+        })
+        .catch(() => {
+          if (disposed) return;
+          imgMat.map = statusTexture('error');
+          imgMat.needsUpdate = true;
+          changed();
+        });
+    }
+
+    // 캡션 (명제표)
+    if (art && it.showCaption) {
+      const capTex = acquireCaptionTexture(art.title, art.artist, art.year);
+      cleanups.push(() => releaseCaptionTexture(capTex));
+      const edgeMat = new THREE.MeshStandardMaterial({ color: '#f4f2ed', roughness: 0.8 });
+      const faceMat = new THREE.MeshStandardMaterial({ map: capTex, roughness: 0.85 });
+      const plaque = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.129, 0.008), [edgeMat, edgeMat, edgeMat, edgeMat, faceMat, edgeMat]);
+      const localX = d.outerW / 2 + 0.12 + 0.11;
+      const localY = Math.min(1.42, it.elevation) - it.elevation;
+      plaque.position.set(localX, localY, 0.004);
+      plaque.applyMatrix4(M);
+      plaque.userData = { kind: 'frame', id: it.id };
+      group.add(plaque);
+      pickables.push(plaque);
+    }
+
+    // 벽에 떨어지는 빛
+    const ww = d.outerW * 1.45 + 0.9;
+    const wh = d.outerH * 1.45 + 0.9;
+    const wg = new THREE.PlaneGeometry(ww, wh);
+    wg.translate(0, 0.12, 0.003);
+    wg.applyMatrix4(M);
+    washGeos.push(wg);
+
+    // 천장 스포트 조명
+    lightMatrices.push(
+      new THREE.Matrix4().compose(
+        new THREE.Vector3(pose.x + pose.nx * 1.3, H, pose.z + pose.nz * 1.3),
+        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), pose.rotY),
+        new THREE.Vector3(1, 1, 1),
+      ),
+    );
+
+    const center = new THREE.Vector3(0, 0, d.matZ).applyMatrix4(M);
+    frames.push({ id: it.id, item: it, artwork: art, pose, center, dims: d });
+
+    if (opts.selectedId === it.id) {
+      selectionBoxes.push(outline([-d.outerW / 2 - 0.03, -d.outerH / 2 - 0.03, 0], [d.outerW / 2 + 0.03, d.outerH / 2 + 0.03, d.depth + 0.03], M));
+    }
+  }
+
+  for (const [style, list] of moldingByStyle) {
+    const g = merge(list);
+    if (!g) continue;
+    const spec = FRAME_STYLE_SPEC[style];
+    const mat = new THREE.MeshStandardMaterial({ color: spec.color, metalness: spec.metalness, roughness: spec.roughness });
+    if (style === 'oak') applyTextureSet(mat, 'frame_oak');
+    const m = new THREE.Mesh(g, mat);
+    m.name = `frames:${style}`;
+    group.add(m);
+  }
+  const matGeo = merge(matGeos);
+  if (matGeo) {
+    const m = new THREE.Mesh(matGeo, new THREE.MeshStandardMaterial({ color: '#f7f6f2', roughness: 0.92 }));
+    m.name = 'mats';
+    group.add(m);
+  }
+  const washGeo = merge(washGeos);
+  if (washGeo) {
+    const wash = new THREE.Mesh(
+      washGeo,
+      new THREE.MeshBasicMaterial({
+        map: wallWashTexture(),
+        color: preset.washColor,
+        transparent: true,
+        opacity: preset.wash,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    wash.renderOrder = 2;
+    wash.name = 'wall-wash';
+    group.add(wash);
+  }
+
+  // ── 비동기 모델 (조명, 소품, 엘리베이터) ────────────────
+  const whenModel = (name: ModelName, fn: (tpl: THREE.Object3D) => void) => {
+    const tpl = getLoadedModel(name);
+    if (tpl) fn(tpl);
+    else
+      void loadModel(name).then((t) => {
+        if (disposed) return;
+        fn(t);
+        changed();
+      });
+  };
+
+  if (lightMatrices.length && opts.mode === 'visit') {
+    whenModel('track_light', (tpl) => {
+      const inst = instanceModel(tpl, lightMatrices);
+      inst.name = 'track-lights';
+      group.add(inst);
+    });
+  }
+
+  // 소품
+  const byType = new Map<PropType, THREE.Matrix4[]>();
+  const shadowGeos: THREE.BufferGeometry[] = [];
+  for (const p of floor.props) {
+    const m = new THREE.Matrix4().compose(
+      new THREE.Vector3(p.x, 0, p.z),
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), p.rotation),
+      new THREE.Vector3(1, 1, 1),
+    );
+    if (!byType.has(p.type)) byType.set(p.type, []);
+    byType.get(p.type)!.push(m);
+    const spec = PROP_SPEC[p.type];
+    const sg = new THREE.PlaneGeometry(spec.w * 1.25 + 0.2, spec.d * 1.25 + 0.2);
+    sg.rotateX(-Math.PI / 2);
+    sg.translate(0, 0.006, 0);
+    sg.applyMatrix4(m);
+    shadowGeos.push(sg);
+    if (opts.selectedId === p.id) {
+      selectionBoxes.push(outline([-spec.w / 2, 0, -spec.d / 2], [spec.w / 2, 1.2, spec.d / 2], m));
+    }
+  }
+  const shadowGeo = merge(shadowGeos);
+  if (shadowGeo) {
+    const sh = new THREE.Mesh(shadowGeo, new THREE.MeshBasicMaterial({ map: contactShadowTexture(), transparent: true, depthWrite: false }));
+    sh.renderOrder = 1;
+    sh.name = 'contact-shadows';
+    group.add(sh);
+  }
+  for (const [type, mats] of byType) {
+    whenModel(PROP_MODEL[type], (tpl) => {
+      const inst = instanceModel(tpl, mats);
+      inst.name = `props:${type}`;
+      group.add(inst);
+    });
+  }
+
+  // 엘리베이터
+  const elevators: ElevatorInfo[] = [];
+  for (const it of floor.wallItems) {
+    if (it.kind !== 'elevator' || !isFaceValid(floor, it, parts)) continue;
+    const pose = wallItemPose(it);
+    const holder = new THREE.Group();
+    // 엘리베이터 모델 원점 = 벽 표면 하단 중앙
+    holder.position.set(pose.x, 0, pose.z);
+    holder.rotation.y = pose.rotY;
+    holder.userData = { kind: 'elevator', id: it.id };
+    group.add(holder);
+    pickables.push(holder);
+    const info: ElevatorInfo = {
+      id: it.id,
+      pose,
+      center: new THREE.Vector3(pose.x, 1.2, pose.z),
+      doorL: null,
+      doorR: null,
+      doorBase: [0, 0],
+      root: holder,
+    };
+    elevators.push(info);
+    whenModel('elevator', (tpl) => {
+      const obj = tpl.clone(true);
+      obj.traverse((o) => (o.userData.shared = true));
+      holder.add(obj);
+      info.doorL = obj.getObjectByName('DoorL') ?? null;
+      info.doorR = obj.getObjectByName('DoorR') ?? null;
+      info.doorBase = [info.doorL?.position.x ?? 0, info.doorR?.position.x ?? 0];
+      const ind = tpl.getObjectByName('Indicator');
+      if (ind) {
+        // 템플릿은 씬에 붙지 않으므로 월드 = 모델 로컬 좌표
+        tpl.updateMatrixWorld(true);
+        const bb = new THREE.Box3().setFromObject(ind);
+        const c = bb.getCenter(new THREE.Vector3());
+        const w = Math.max(0.12, (bb.max.x - bb.min.x) * 0.92);
+        const h = Math.max(0.04, (bb.max.y - bb.min.y) * 0.85);
+        const plane = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: floorIndicatorTexture(floor.name), toneMapped: false }));
+        plane.position.set(c.x, c.y, bb.max.z + 0.002);
+        holder.add(plane);
+      }
+    });
+    if (opts.selectedId === it.id) {
+      selectionBoxes.push(outline([-1, 0, 0], [1, 2.75, 0.15], new THREE.Matrix4().compose(holder.position, holder.quaternion, new THREE.Vector3(1, 1, 1))));
+    }
+  }
+
+  for (const s of selectionBoxes) {
+    s.userData.helper = true;
+    group.add(s);
+  }
+
+  const colliders = buildColliders(floor, runs);
+
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    cleanups.forEach((c) => c());
+    group.traverse((o) => {
+      if (o.userData.shared) return;
+      const mesh = o as THREE.Mesh;
+      if (mesh.geometry) mesh.geometry.dispose();
+      const mats = mesh.material ? (Array.isArray(mesh.material) ? mesh.material : [mesh.material]) : [];
+      for (const m of mats) m.dispose();
+    });
+    group.removeFromParent();
+  };
+
+  return { group, frames, elevators, pickables, floorMesh, colliders, dispose };
+}
+
+/** 미리보기 선택 강조용 외곽선 박스 */
+function outline(min: number[], max: number[], m: THREE.Matrix4): THREE.LineSegments {
+  const g = new THREE.BoxGeometry(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+  g.translate((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
+  const edges = new THREE.EdgesGeometry(g);
+  g.dispose();
+  const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: '#ff5a1f', depthTest: false }));
+  line.renderOrder = 10;
+  line.applyMatrix4(m);
+  return line;
+}
