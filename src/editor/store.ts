@@ -4,9 +4,15 @@ import { CELL } from '../core/constants';
 import { cellAt, isFaceValid, isFilled } from '../core/grid';
 import type { Exhibition, Floor, PropType } from '../core/types';
 
-export type Tool = 'select' | 'room' | 'wall' | 'frame' | 'elevator' | 'prop' | 'spawn' | 'erase';
+export type Tool = 'select' | 'room' | 'wall' | 'frame' | 'text' | 'elevator' | 'prop' | 'spawn' | 'erase';
 
-export type Selection = { kind: 'wallItem'; id: string } | { kind: 'prop'; id: string } | { kind: 'spawn' } | { kind: 'artwork'; id: string };
+export type Selection =
+  | { kind: 'wallItem'; id: string }
+  | { kind: 'prop'; id: string }
+  | { kind: 'spawn' }
+  | { kind: 'artwork'; id: string }
+  /** 여러 벽 항목·소품을 함께 선택 (Shift+클릭, Shift+드래그, Ctrl+A) */
+  | { kind: 'multi'; ids: string[] };
 
 export type InspectorTab = 'selection' | 'floor' | 'exhibition';
 export type ViewLayout = '2d' | 'split' | '3d';
@@ -25,12 +31,14 @@ interface EditorState {
   past: Exhibition[];
   future: Exhibition[];
   txn: boolean;
+  /** 트랜잭션 시작 시점의 다시실행 목록 (변화가 없으면 복구) */
+  txnFuture: Exhibition[];
   revision: number;
 
   load(doc: Exhibition): void;
   setTool(t: Tool): void;
   setFloorIndex(i: number): void;
-  select(s: Selection | null): void;
+  select(s: Selection | null, opts?: { keepTab?: boolean }): void;
   setTab(t: InspectorTab): void;
   setLayout(l: ViewLayout): void;
   setRoomMode(m: 'add' | 'remove'): void;
@@ -61,6 +69,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   past: [],
   future: [],
   txn: false,
+  txnFuture: [],
   revision: 0,
 
   load(doc) {
@@ -72,8 +81,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   setFloorIndex(i) {
     set({ floorIndex: i, selection: null });
   },
-  select(selection) {
-    set({ selection, ...(selection ? { tab: 'selection' as const } : {}) });
+  select(selection, opts) {
+    set({ selection, ...(selection && !opts?.keepTab ? { tab: 'selection' as const } : {}) });
   },
   setTab(tab) {
     set({ tab });
@@ -116,16 +125,16 @@ export const useEditor = create<EditorState>((set, get) => ({
     }, opts);
   },
   beginTxn() {
-    const { doc, past, txn } = get();
+    const { doc, past, txn, future } = get();
     if (!doc || txn) return;
-    set({ txn: true, past: [...past.slice(-HISTORY_LIMIT + 1), doc], future: [] });
+    set({ txn: true, past: [...past.slice(-HISTORY_LIMIT + 1), doc], future: [], txnFuture: future });
   },
   endTxn() {
-    const { txn, past, doc } = get();
+    const { txn, past, doc, txnFuture } = get();
     if (!txn) return;
     // 트랜잭션 중 아무 변화가 없었다면 기록을 되돌린다
-    if (past[past.length - 1] === doc) set({ txn: false, past: past.slice(0, -1) });
-    else set({ txn: false });
+    if (past[past.length - 1] === doc) set({ txn: false, past: past.slice(0, -1), future: txnFuture, txnFuture: [] });
+    else set({ txn: false, txnFuture: [] });
   },
   undo() {
     const { past, future, doc } = get();
@@ -157,6 +166,35 @@ export const useEditor = create<EditorState>((set, get) => ({
 
 export function currentFloor(s: { doc: Exhibition | null; floorIndex: number }): Floor | null {
   return s.doc?.floors[s.floorIndex] ?? null;
+}
+
+/** 선택된 벽 항목·소품 id 목록 */
+export function selectedIds(sel: Selection | null): string[] {
+  if (!sel) return [];
+  if (sel.kind === 'multi') return sel.ids;
+  if (sel.kind === 'wallItem' || sel.kind === 'prop') return [sel.id];
+  return [];
+}
+
+/** id 목록을 알맞은 선택 상태로 (0개 = 없음, 1개 = 단일, 여러 개 = multi) */
+export function selectionFromIds(floor: Floor, ids: Iterable<string>): Selection | null {
+  const wall = new Set(floor.wallItems.map((w) => w.id));
+  const props = new Set(floor.props.map((p) => p.id));
+  const list = [...new Set(ids)].filter((id) => wall.has(id) || props.has(id));
+  if (!list.length) return null;
+  if (list.length === 1) return wall.has(list[0]) ? { kind: 'wallItem', id: list[0] } : { kind: 'prop', id: list[0] };
+  return { kind: 'multi', ids: list };
+}
+
+/** Shift+클릭: 선택에 넣거나 뺀다 */
+export function toggleSelected(id: string) {
+  const st = useEditor.getState();
+  const floor = currentFloor(st);
+  if (!floor) return;
+  const cur = new Set(selectedIds(st.selection));
+  if (cur.has(id)) cur.delete(id);
+  else cur.add(id);
+  st.select(selectionFromIds(floor, cur));
 }
 
 /**

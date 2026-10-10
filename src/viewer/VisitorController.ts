@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 import { EYE_HEIGHT, PLAYER_RADIUS } from '../core/constants';
 import { isPathBlocked, resolveCircle, type Colliders } from '../core/collision';
-import type { FloorScene, FrameInfo } from '../three/buildFloor';
+import type { FloorScene, StopInfo } from '../three/buildFloor';
 
 export interface ControllerEvents {
-  onFrameClick(frame: FrameInfo): void;
+  onStopClick(stop: StopInfo): void;
   onElevatorClick(id: string): void;
   onMoveStart(): void;
   onNearElevator(id: string | null): void;
@@ -57,6 +57,35 @@ export class VisitorController {
   fade = 0;
   enabled = true;
   readonly cursor: THREE.Mesh;
+  /** VR 관람 중: 위치·방향은 카메라 받침대(rig)로 옮기고, 머리 움직임은 기기가 맡는다 */
+  private xr: { rig: THREE.Object3D } | null = null;
+
+  get xrActive() {
+    return !!this.xr;
+  }
+
+  setXR(rig: THREE.Object3D | null) {
+    if (!rig && this.xr) {
+      this.xr.rig.position.set(0, 0, 0);
+      this.xr.rig.rotation.set(0, 0, 0);
+    }
+    this.xr = rig ? { rig } : null;
+    this.mode = { kind: 'free' };
+    this.pitch = 0;
+    this.apply();
+  }
+
+  /** VR: 받침대를 세계 좌표로 이동 (벽·소품 충돌 반영) */
+  moveBy(dx: number, dz: number) {
+    [this.x, this.z] = resolveCircle(this.x + dx, this.z + dz, PLAYER_RADIUS, this.colliders);
+    this.apply();
+  }
+
+  /** VR: 제자리 회전 (스냅 턴) */
+  turnBy(dYaw: number) {
+    this.yaw += dYaw;
+    this.apply();
+  }
 
   constructor(
     private readonly camera: THREE.PerspectiveCamera,
@@ -102,13 +131,13 @@ export class VisitorController {
   availW = 1;
   availH = 1;
 
-  /** 작품 정면에서 작품이 화면에 알맞게 들어오는 위치 */
-  viewPoseFor(frame: FrameInfo): Pose {
-    const { pose, dims, center } = frame;
+  /** 작품(또는 벽 글) 정면에서 화면에 알맞게 들어오는 위치 */
+  viewPoseFor(stop: StopInfo): Pose {
+    const { pose, center } = stop;
     const vfov = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2) * this.availH);
     const hfov = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2) * this.camera.aspect * this.availW);
-    const needH = dims.outerH * 1.45;
-    const needW = (dims.outerW + (frame.item.showCaption ? 0.9 : 0)) * 1.3;
+    const needH = stop.viewH * 1.45;
+    const needW = stop.viewW * 1.3;
     let dist = Math.max(needH / 2 / Math.tan(vfov / 2), needW / 2 / Math.tan(hfov / 2));
     dist = THREE.MathUtils.clamp(dist, 1.2, 6);
     // 방 안으로 너무 들어가 벽에 부딪히면 거리를 줄인다
@@ -126,8 +155,14 @@ export class VisitorController {
     return { x, z, y: eyeY, yaw, pitch };
   }
 
-  focusFrame(frame: FrameInfo, done?: () => void) {
-    const to = this.viewPoseFor(frame);
+  focusStop(stop: StopInfo, done?: () => void) {
+    const to = this.viewPoseFor(stop);
+    if (this.xr) {
+      // VR 에서는 움직이는 카메라가 멀미를 부르므로 바로 옮긴다
+      this.teleport(to.x, to.z, to.yaw);
+      done?.();
+      return;
+    }
     const blocked = isPathBlocked(this.x, this.z, to.x, to.z, this.colliders);
     const dist = Math.hypot(to.x - this.x, to.z - this.z);
     this.tweenTo(to, blocked || dist > 14, done);
@@ -240,17 +275,27 @@ export class VisitorController {
   }
 
   private apply() {
+    if (this.xr) {
+      this.xr.rig.position.set(this.x, 0, this.z);
+      this.xr.rig.rotation.set(0, this.yaw, 0);
+      return;
+    }
     this.camera.position.set(this.x, this.y, this.z);
     this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
   }
 
   private pick(clientX: number, clientY: number) {
-    if (!this.floor) return null;
     const rect = this.dom.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
+    return this.pickWith(this.raycaster);
+  }
+
+  /** 광선이 처음 닿는 바닥·작품·엘리베이터 (VR 컨트롤러 겨냥에도 사용) */
+  pickWith(raycaster: THREE.Raycaster) {
+    if (!this.floor) return null;
     const targets = [...this.floor.pickables, this.floor.floorMesh, ...this.floor.group.children.filter((c) => c.name === 'walls')];
-    const hits = this.raycaster.intersectObjects(targets, true);
+    const hits = raycaster.intersectObjects(targets, true);
     for (const h of hits) {
       let o: THREE.Object3D | null = h.object;
       while (o && !o.userData.kind) o = o.parent;
@@ -286,18 +331,23 @@ export class VisitorController {
     if (!p || p.id !== e.pointerId) return;
     this.pointer = null;
     if (p.moved || this.busy || !this.enabled) return;
-    const hit = this.pick(e.clientX, e.clientY);
+    this.activate(this.pick(e.clientX, e.clientY));
+  };
+
+  /** 클릭(또는 VR 컨트롤러 선택)한 곳에 따라 감상·엘리베이터·걷기 */
+  activate(hit: ReturnType<VisitorController['pickWith']>) {
     if (!hit) return;
-    if (hit.kind === 'frame' && hit.id) {
-      const f = this.floor?.frames.find((x) => x.id === hit.id);
-      if (f) this.events.onFrameClick(f);
+    if ((hit.kind === 'frame' || hit.kind === 'text' || hit.kind === 'object') && hit.id) {
+      const f = this.floor?.stops.find((x) => x.id === hit.id);
+      if (f) this.events.onStopClick(f);
     } else if (hit.kind === 'elevator' && hit.id) {
       this.events.onElevatorClick(hit.id);
     } else if (hit.kind === 'floor') {
-      this.mode = { kind: 'walkTo', x: hit.point.x, z: hit.point.z };
+      if (this.xr) this.teleport(hit.point.x, hit.point.z, this.yaw);
+      else this.mode = { kind: 'walkTo', x: hit.point.x, z: hit.point.z };
       this.events.onMoveStart();
     }
-  };
+  }
 
   private onWheel = (e: WheelEvent) => {
     if (!this.enabled || this.busy) return;

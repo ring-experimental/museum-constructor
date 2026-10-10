@@ -1,23 +1,49 @@
 import { toast } from '../components/Toast';
 import { MAX_FLOORS, PROP_SPEC } from '../core/constants';
-import { autoHang, createFloor, newElevator, newFrame } from '../core/factory';
+import { autoHang, createFloor, newElevator, newFrame, newProp, newText } from '../core/factory';
 import { cellAt, faceId, isFilled, type WallFace } from '../core/grid';
 import { uid } from '../core/ids';
-import type { Artwork, Exhibition, Floor } from '../core/types';
+import type { Artwork, ArtworkMedia, Exhibition, Floor } from '../core/types';
+import { WALL_MEDIA } from '../core/schema';
+import { readPhotoMeta } from '../storage/exif';
+import { isModelFile, prepareModelFile } from '../three/modelArtwork';
+import { isVideoFile, prepareVideoFile } from '../storage/videoFiles';
 import { imageRepo, probeImageUrl } from '../storage/imageRepo';
-import { cleanupFloor, currentFloor, useEditor } from './store';
+import { cleanupFloor, currentFloor, selectedIds, selectionFromIds, useEditor } from './store';
 
 const S = () => useEditor.getState();
 
+/** 작품별로 걸린(올려진) 곳 수 — 벽 액자 + 조각 좌대 */
 export function usageMap(doc: Exhibition): Map<string, number> {
   const m = new Map<string, number>();
-  for (const f of doc.floors) for (const w of f.wallItems) if (w.kind === 'frame' && w.artworkId) m.set(w.artworkId, (m.get(w.artworkId) ?? 0) + 1);
+  const add = (id: string | null) => id && m.set(id, (m.get(id) ?? 0) + 1);
+  for (const f of doc.floors) {
+    for (const w of f.wallItems) if (w.kind === 'frame') add(w.artworkId);
+    for (const p of f.props) add(p.artworkId);
+  }
   return m;
 }
 
+/** 벽에 거는 작품인지(이미지) 좌대에 올리는 작품인지(입체) */
+export const isWallMedia = (media: ArtworkMedia) => WALL_MEDIA.has(media);
+/** 액자에 고를 수 있는 작품 종류 */
+export const WALL_PICKER_MEDIA: ArtworkMedia[] = [...WALL_MEDIA];
+
+/** 파일 선택창에서 받을 형식 */
+export function acceptFor(media: ArtworkMedia[]) {
+  const parts: string[] = [];
+  if (media.includes('image')) parts.push('image/*');
+  if (media.includes('video')) parts.push('video/mp4', 'video/webm', 'video/quicktime', '.mp4', '.webm', '.mov', '.m4v');
+  if (media.includes('model')) parts.push('.glb', 'model/gltf-binary');
+  return parts.join(',');
+}
+
+/** 같은 종류(벽/좌대) 중 아직 배치되지 않은 다음 작품 */
 function nextUnplaced(doc: Exhibition, after: string | null): string | null {
   const used = usageMap(doc);
-  const list = doc.artworks;
+  const ref = doc.artworks.find((a) => a.id === after);
+  const wall = ref ? isWallMedia(ref.media) : true;
+  const list = doc.artworks.filter((a) => isWallMedia(a.media) === wall);
   const start = after ? list.findIndex((a) => a.id === after) + 1 : 0;
   for (let k = 0; k < list.length; k++) {
     const a = list[(start + k) % list.length];
@@ -45,6 +71,16 @@ export function placeFrame(face: WallFace, artworkId: string | null = S().pendin
     S().setPending(nextUnplaced(doc, artworkId));
   }
   return frame.id;
+}
+
+export function placeText(face: WallFace) {
+  const item = newText(face);
+  S().mutateFloor((f) => {
+    f.wallItems.push(item);
+  });
+  S().select({ kind: 'wallItem', id: item.id });
+  S().setTab('selection');
+  return item.id;
 }
 
 export function placeElevator(face: WallFace) {
@@ -77,18 +113,38 @@ export function placeProp(x: number, z: number) {
     toast('소품은 바닥 위에만 놓을 수 있어요');
     return;
   }
-  const id = uid('pr');
+  // 좌대를 놓을 때 '다음에 올릴 입체 작품'이 있으면 함께 올린다
+  const pending = st.pendingArtworkId ? st.doc?.artworks.find((a) => a.id === st.pendingArtworkId) : undefined;
+  const artId = st.propType === 'pedestal' && pending?.media === 'model' ? pending.id : null;
+  const prop = newProp(st.propType, x, z, st.propRotation, artId);
   st.mutateFloor((fl) => {
-    fl.props.push({ id, type: st.propType, x, z, rotation: st.propRotation });
+    fl.props.push(prop);
   });
-  st.select({ kind: 'prop', id });
+  st.select({ kind: 'prop', id: prop.id });
+  if (artId) S().setPending(nextUnplaced(S().doc!, artId));
+}
+
+/** 조각 좌대에 입체 작품을 올리거나(null 이면) 내린다 */
+export function assignSculpture(propId: string, artworkId: string | null) {
+  S().mutateFloor((f) => {
+    const p = f.props.find((x) => x.id === propId);
+    if (p && p.type === 'pedestal') p.artworkId = artworkId;
+  });
+  if (artworkId && S().pendingArtworkId === artworkId) S().setPending(nextUnplaced(S().doc!, artworkId));
 }
 
 export function deleteSelection() {
   const st = S();
   const sel = st.selection;
   if (!sel) return;
-  if (sel.kind === 'wallItem') st.mutateFloor((f) => void (f.wallItems = f.wallItems.filter((w) => w.id !== sel.id)));
+  if (sel.kind === 'multi') {
+    const ids = new Set(sel.ids);
+    st.mutateFloor((f) => {
+      f.wallItems = f.wallItems.filter((w) => !ids.has(w.id));
+      f.props = f.props.filter((p) => !ids.has(p.id));
+    });
+    toast(`${ids.size}개 항목을 지웠어요 (Ctrl+Z 로 되돌리기)`);
+  } else if (sel.kind === 'wallItem') st.mutateFloor((f) => void (f.wallItems = f.wallItems.filter((w) => w.id !== sel.id)));
   else if (sel.kind === 'prop') st.mutateFloor((f) => void (f.props = f.props.filter((p) => p.id !== sel.id)));
   else if (sel.kind === 'spawn') st.mutateFloor((f) => void (f.spawn = null));
   else if (sel.kind === 'artwork') return removeArtwork(sel.id);
@@ -99,7 +155,32 @@ export function deleteItem(kind: 'wallItem' | 'prop', id: string) {
   const st = S();
   if (kind === 'wallItem') st.mutateFloor((f) => void (f.wallItems = f.wallItems.filter((w) => w.id !== id)));
   else st.mutateFloor((f) => void (f.props = f.props.filter((p) => p.id !== id)));
-  if (st.selection && 'id' in st.selection && st.selection.id === id) st.select(null);
+  const floor = currentFloor(S());
+  if (floor && selectedIds(st.selection).includes(id)) st.select(selectionFromIds(floor, selectedIds(st.selection).filter((x) => x !== id)));
+}
+
+/** 선택한 소품들을 조금씩 옮긴다 (방향키) */
+export function nudgeSelectedProps(dx: number, dz: number) {
+  const ids = new Set(selectedIds(S().selection));
+  S().mutateFloor((f) => {
+    for (const p of f.props) {
+      if (!ids.has(p.id)) continue;
+      const nx = Math.round((p.x + dx) * 100) / 100;
+      const nz = Math.round((p.z + dz) * 100) / 100;
+      const [i, j] = cellAt(nx, nz);
+      if (!isFilled(f as Floor, i, j)) continue;
+      p.x = nx;
+      p.z = nz;
+    }
+  });
+}
+
+/** 선택한 소품들을 각자 제자리에서 90° 회전 */
+export function rotateSelectedProps() {
+  const ids = new Set(selectedIds(S().selection));
+  S().mutateFloor((f) => {
+    for (const p of f.props) if (ids.has(p.id)) p.rotation = (p.rotation + Math.PI / 2) % (Math.PI * 2);
+  });
 }
 
 function titleFromFile(name: string) {
@@ -110,25 +191,65 @@ export async function addArtworksFromFiles(files: File[] | FileList) {
   const st = S();
   const doc = st.doc;
   if (!doc) return [];
-  const list = [...files].filter((f) => f.type.startsWith('image/'));
+  const all = [...files];
+  const list = all.filter((f) => f.type.startsWith('image/') || isModelFile(f) || isVideoFile(f));
   if (!list.length) {
-    toast('이미지 파일(JPG, PNG, WebP 등)만 올릴 수 있어요', 'error');
+    toast('이미지(JPG, PNG, WebP 등), 영상(MP4, WebM), 3D 모델(.glb) 파일만 올릴 수 있어요', 'error');
     return [];
   }
-  toast(`사진 ${list.length}장을 처리하는 중…`);
+  if (list.length < all.length) toast(`지원하지 않는 파일 ${all.length - list.length}개는 건너뛰었어요`);
+  toast(`작품 ${list.length}점을 처리하는 중…`);
   const added: Artwork[] = [];
   for (const file of list) {
     try {
+      if (isVideoFile(file)) {
+        const v = await prepareVideoFile(file);
+        const blobId = await imageRepo.putRaw(doc.id, file, v.poster, v.width, v.height);
+        added.push({
+          id: uid('art'),
+          media: 'video',
+          source: { kind: 'upload', blobId },
+          width: v.width,
+          height: v.height,
+          title: titleFromFile(file.name),
+          artist: doc.curator.slice(0, 60),
+          year: '',
+          description: '',
+    audioBlobId: null,
+        });
+        continue;
+      }
+      if (isModelFile(file)) {
+        const m = await prepareModelFile(file);
+        const blobId = await imageRepo.putRaw(doc.id, m.blob, m.thumb, m.size, m.size);
+        added.push({
+          id: uid('art'),
+          media: 'model',
+          source: { kind: 'upload', blobId },
+          width: m.size,
+          height: m.size,
+          title: titleFromFile(file.name),
+          artist: doc.curator.slice(0, 60),
+          year: '',
+          description: '',
+    audioBlobId: null,
+        });
+        continue;
+      }
+      // 저장 시 다시 인코딩하면서 원본 메타데이터는 지워지므로 먼저 읽어 둔다
+      const meta = await readPhotoMeta(file);
       const r = await imageRepo.put(doc.id, file);
       added.push({
         id: uid('art'),
+        media: 'image',
         source: { kind: 'upload', blobId: r.blobId },
         width: r.width,
         height: r.height,
-        title: titleFromFile(file.name),
-        artist: doc.curator,
-        year: '',
-        description: '',
+        title: (meta.title ?? titleFromFile(file.name)).slice(0, 60),
+        artist: (meta.artist ?? doc.curator).slice(0, 60),
+        year: meta.year ?? '',
+        description: meta.description ?? '',
+        audioBlobId: null,
       });
     } catch (e) {
       toast(`${file.name}: ${(e as Error).message}`, 'error');
@@ -140,7 +261,10 @@ export async function addArtworksFromFiles(files: File[] | FileList) {
       if (!d.coverArtworkId) d.coverArtworkId = added[0].id;
     });
     if (!S().pendingArtworkId) S().setPending(added[0].id);
-    toast(`사진 ${added.length}장을 작품 보관함에 추가했어요`, 'success');
+    const models = added.filter((a) => a.media === 'model').length;
+    const videos = added.filter((a) => a.media === 'video').length;
+    const extra = [videos && `영상 ${videos}점`, models && `입체 ${models}점은 조각 좌대에 올릴 수 있어요`].filter(Boolean).join(' · ');
+    toast(extra ? `작품 ${added.length}점을 보관함에 추가했어요 (${extra})` : `사진 ${added.length}장을 작품 보관함에 추가했어요`, 'success');
   }
   return added;
 }
@@ -160,6 +284,7 @@ export async function addArtworkFromUrl(url: string): Promise<{ ok: boolean; mes
   }
   const art: Artwork = {
     id: uid('art'),
+    media: 'image',
     source: { kind: 'url', url: trimmed },
     width: probe.width,
     height: probe.height,
@@ -167,6 +292,7 @@ export async function addArtworkFromUrl(url: string): Promise<{ ok: boolean; mes
     artist: S().doc?.curator ?? '',
     year: '',
     description: '',
+    audioBlobId: null,
   };
   S().mutate((d) => {
     d.artworks.push(art);
@@ -184,7 +310,10 @@ export function removeArtwork(id: string) {
   if (used && !confirm(`이 작품은 액자 ${used}곳에 걸려 있어요. 보관함에서 삭제하면 액자는 빈 상태가 됩니다. 삭제할까요?`)) return;
   st.mutate((d) => {
     d.artworks = d.artworks.filter((a) => a.id !== id);
-    for (const f of d.floors) for (const w of f.wallItems) if (w.kind === 'frame' && w.artworkId === id) w.artworkId = null;
+    for (const f of d.floors) {
+      for (const w of f.wallItems) if (w.kind === 'frame' && w.artworkId === id) w.artworkId = null;
+      for (const p of f.props) if (p.artworkId === id) p.artworkId = null;
+    }
     if (d.coverArtworkId === id) d.coverArtworkId = d.artworks[0]?.id ?? null;
   });
   if (st.pendingArtworkId === id) st.setPending(null);
@@ -206,9 +335,10 @@ export function autoHangUnplaced() {
   const floor = currentFloor(st);
   if (!doc || !floor) return;
   const used = usageMap(doc);
-  const unplaced = doc.artworks.filter((a) => !used.has(a.id));
+  const unplaced = doc.artworks.filter((a) => !used.has(a.id) && isWallMedia(a.media));
   if (!unplaced.length) {
-    toast('모든 작품이 이미 걸려 있어요');
+    const models = doc.artworks.filter((a) => !used.has(a.id) && !isWallMedia(a.media)).length;
+    toast(models ? `남은 ${models}점은 입체 작품이에요. 소품 도구로 조각 좌대를 놓으면 올라가요.` : '모든 작품이 이미 걸려 있어요');
     return;
   }
   let placed = 0;
@@ -239,6 +369,7 @@ export function addFloor(duplicateCurrent: boolean) {
     // 구조만 복제: 액자는 비우고 엘리베이터와 소품은 유지
     fl.wallItems = fl.wallItems.filter((w) => w.kind === 'elevator').map((w) => ({ ...w, id: uid('el') }));
     fl.props = fl.props.map((p) => ({ ...p, id: uid('pr') }));
+    fl.tourOrder = [];
   } else {
     fl = createFloor(name, cur?.cols ?? 12, cur?.rows ?? 10);
   }

@@ -1,4 +1,5 @@
-import { autoHang, createExhibitionFromTemplate } from '../core/factory';
+import { autoHang, createExhibitionFromTemplate, newText } from '../core/factory';
+import { edgeKey } from '../core/grid';
 import { uid } from '../core/ids';
 import type { Artwork } from '../core/types';
 import { LEGACY_SAMPLE_TITLES, SAMPLE_ASPECTS, SAMPLE_COUNT, SAMPLE_TITLES } from './artworkSource';
@@ -38,6 +39,7 @@ async function seed() {
       const aspect = SAMPLE_ASPECTS[i];
       return {
         id: uid('art'),
+        media: 'image',
         source: { kind: 'sample', index: i },
         width: aspect >= 1 ? 1200 : Math.round(1200 * aspect),
         height: aspect >= 1 ? Math.round(1200 / aspect) : 1200,
@@ -45,10 +47,18 @@ async function seed() {
         artist: '샘플 작가',
         year: '2026',
         description: '샘플 작품 설명입니다. 편집 모드의 작품 정보 패널에서 제목, 작가, 연도, 설명을 입력할 수 있어요.',
+        audioBlobId: null,
       };
     });
     ex.artworks = arts;
     ex.coverArtworkId = arts[0].id;
+    // 시작 위치에서 마주 보이는 벽에 서문 (감상 순서의 첫 번째)
+    const intro = newText({ edge: edgeKey('h', 4, 7), side: -1 });
+    intro.title = '빛의 기록';
+    intro.body = '하루 동안 변하는 빛을 따라 걷는 사진전입니다.\n작품 앞에 서면 설명이 나타나고, 오른쪽 아래 ‘작품 순서대로 감상’을 누르면 차례로 둘러볼 수 있어요.';
+    intro.align = 'center';
+    ex.floors[0].wallItems.push(intro);
+    ex.floors[0].tourOrder = [intro.id];
     const n1 = autoHang(ex.floors[0], arts.slice(0, 7));
     autoHang(ex.floors[1], arts.slice(n1));
     await exhibitionRepo.save(ex);

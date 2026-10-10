@@ -2,10 +2,11 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { CELL, ELEVATOR_WIDTH, PROP_SPEC, WALL_THICKNESS } from '../core/constants';
 import { fillRect } from '../core/factory';
 import { cellAt, computeWallEdges, edgeKey, isFilled, nearestEdge, nearestFace, parseEdge, wallItemPose, type WallEdge } from '../core/grid';
+import { tourSequence } from '../core/tour';
 import type { Floor, FrameItem, Prop, Spawn, WallItem } from '../core/types';
 import { frameDims } from '../three/frameGeometry';
-import { assignArtwork, deleteItem, existingItemOnFace, placeElevator, placeFrame, placeProp, reportCleanup } from './actions';
-import { cleanupFloor, snap, useEditor, type Tool } from './store';
+import { assignArtwork, assignSculpture, deleteItem, existingItemOnFace, placeElevator, placeFrame, placeProp, placeText, reportCleanup } from './actions';
+import { cleanupFloor, selectedIds, selectionFromIds, snap, toggleSelected, useEditor, type Tool } from './store';
 import { useArtworkThumbs } from './useArtworkThumbs';
 
 interface View {
@@ -21,7 +22,8 @@ type Drag =
   | { kind: 'moveProp'; id: string; ox: number; oz: number }
   | { kind: 'moveWallItem'; id: string }
   | { kind: 'moveSpawn' }
-  | { kind: 'spawnDir' };
+  | { kind: 'spawnDir' }
+  | { kind: 'marquee'; x0: number; z0: number; x1: number; z1: number };
 
 const ACCENT = '#ff5a1f';
 const DEG = 180 / Math.PI;
@@ -154,6 +156,15 @@ export function PlanCanvas() {
 
     switch (tool) {
       case 'select': {
+        // Shift/Ctrl+클릭: 선택에 더하거나 빼기
+        if ((hitKind === 'wallItem' || hitKind === 'prop') && hitId && (e.shiftKey || e.ctrlKey || e.metaKey)) {
+          toggleSelected(hitId);
+          return;
+        }
+        if (!hitKind && e.shiftKey) {
+          setDragBoth({ kind: 'marquee', x0: p.x, z0: p.z, x1: p.x, z1: p.z });
+          return;
+        }
         if (hitKind === 'wallItem' && hitId) {
           st.select({ kind: 'wallItem', id: hitId });
           st.beginTxn();
@@ -189,6 +200,7 @@ export function PlanCanvas() {
         break;
       }
       case 'frame':
+      case 'text':
       case 'elevator': {
         if (hitKind === 'wallItem' && hitId) {
           st.select({ kind: 'wallItem', id: hitId });
@@ -202,6 +214,7 @@ export function PlanCanvas() {
           return;
         }
         if (tool === 'frame') placeFrame(face, pendingArtworkId);
+        else if (tool === 'text') placeText(face);
         else placeElevator(face);
         break;
       }
@@ -313,6 +326,9 @@ export function PlanCanvas() {
         });
         break;
       }
+      case 'marquee':
+        setDragBoth({ ...d, x1: p.x, z1: p.z });
+        break;
       case 'spawnDir': {
         const sp = floor.spawn;
         if (!sp) return;
@@ -356,6 +372,19 @@ export function PlanCanvas() {
       reportCleanup(removed);
     } else if (d.kind === 'moveProp' || d.kind === 'moveWallItem' || d.kind === 'moveSpawn' || d.kind === 'spawnDir') {
       st.endTxn();
+    } else if (d.kind === 'marquee') {
+      // 범위 안의 벽 항목(벽면 위치)과 소품(중심)을 기존 선택에 더한다
+      const [x0, x1] = [Math.min(d.x0, d.x1), Math.max(d.x0, d.x1)];
+      const [z0, z1] = [Math.min(d.z0, d.z1), Math.max(d.z0, d.z1)];
+      const inside = (x: number, z: number) => x >= x0 && x <= x1 && z >= z0 && z <= z1;
+      const hits = [
+        ...floor.wallItems.filter((w) => {
+          const p = wallItemPose(w);
+          return inside(p.x, p.z);
+        }),
+        ...floor.props.filter((pr) => inside(pr.x, pr.z)),
+      ].map((x) => x.id);
+      if (hits.length) st.select(selectionFromIds(floor, [...selectedIds(st.selection), ...hits]));
     }
   };
 
@@ -372,8 +401,23 @@ export function PlanCanvas() {
     if (!id) return;
     e.preventDefault();
     const p = toWorld(e.clientX, e.clientY);
-    const target = (e.target as Element).closest('[data-kind="wallItem"]') as HTMLElement | null;
     const st = useEditor.getState();
+    const art = doc.artworks.find((a) => a.id === id);
+    if (art?.media === 'model') {
+      // 입체 작품: 좌대 위에 놓으면 올리고, 빈 바닥이면 좌대를 새로 놓는다
+      const pedestal = (e.target as Element).closest('[data-kind="prop"]') as HTMLElement | null;
+      const pr = pedestal?.dataset.id ? floor.props.find((x) => x.id === pedestal.dataset.id) : undefined;
+      if (pr?.type === 'pedestal') {
+        assignSculpture(pr.id, id);
+        st.select({ kind: 'prop', id: pr.id });
+        return;
+      }
+      st.setPending(id);
+      if (st.propType !== 'pedestal') st.setPropType('pedestal');
+      placeProp(snap(p.x, 0.25), snap(p.z, 0.25));
+      return;
+    }
+    const target = (e.target as Element).closest('[data-kind="wallItem"]') as HTMLElement | null;
     if (target?.dataset.id) {
       const it = floor.wallItems.find((w) => w.id === target.dataset.id);
       if (it?.kind === 'frame') {
@@ -411,10 +455,20 @@ export function PlanCanvas() {
         <g transform={`translate(${view.tx} ${view.ty}) scale(${view.scale})`}>
           <GridLayer floor={floor} />
           <WallLayer edges={edges} partitions={floor.partitions} />
-          <ItemsLayer floor={floor} thumbs={thumbs} artworks={doc.artworks} selectionId={selection && 'id' in selection ? selection.id : selection?.kind === 'spawn' ? '__spawn' : null} />
+          <ItemsLayer floor={floor} thumbs={thumbs} artworks={doc.artworks} selectedKey={selection?.kind === 'spawn' ? '__spawn' : selectedIds(selection).join('|')} />
           {ghost}
           {drag?.kind === 'room' && <RoomDragPreview d={drag} />}
           {drag?.kind === 'wall' && <WallDragPreview d={drag} floor={floor} />}
+          {drag?.kind === 'marquee' && (
+            <rect
+              x={Math.min(drag.x0, drag.x1)}
+              y={Math.min(drag.z0, drag.z1)}
+              width={Math.abs(drag.x1 - drag.x0)}
+              height={Math.abs(drag.z1 - drag.z0)}
+              className="plan-marquee"
+              pointerEvents="none"
+            />
+          )}
           {dropFace && <FaceGhost floor={floor} x={dropFace.x} z={dropFace.z} width={1.1} color={ACCENT} />}
         </g>
       </svg>
@@ -523,23 +577,33 @@ const ItemsLayer = memo(function ItemsLayer({
   floor,
   thumbs,
   artworks,
-  selectionId,
+  selectedKey,
 }: {
   floor: Floor;
   thumbs: Record<string, string>;
   artworks: { id: string; width: number; height: number }[];
-  selectionId: string | null;
+  /** 선택된 id 들을 '|' 로 이은 값 (memo 비교용 문자열) */
+  selectedKey: string;
 }) {
   const artMap = new Map(artworks.map((a) => [a.id, a]));
+  const sel = new Set(selectedKey.split('|'));
+  const order = new Map(tourSequence(floor).map((id, k) => [id, k + 1]));
   return (
     <g>
       {floor.props.map((p) => (
-        <PropShape key={p.id} prop={p} selected={selectionId === p.id} />
+        <PropShape key={p.id} prop={p} selected={sel.has(p.id)} thumb={p.artworkId ? thumbs[p.artworkId] : undefined} order={order.get(p.id)} />
       ))}
       {floor.wallItems.map((w) => (
-        <WallItemShape key={w.id} item={w} selected={selectionId === w.id} thumb={w.kind === 'frame' && w.artworkId ? thumbs[w.artworkId] : undefined} art={w.kind === 'frame' && w.artworkId ? artMap.get(w.artworkId) : undefined} />
+        <WallItemShape
+          key={w.id}
+          item={w}
+          selected={sel.has(w.id)}
+          order={order.get(w.id)}
+          thumb={w.kind === 'frame' && w.artworkId ? thumbs[w.artworkId] : undefined}
+          art={w.kind === 'frame' && w.artworkId ? artMap.get(w.artworkId) : undefined}
+        />
       ))}
-      {floor.spawn && <SpawnShape spawn={floor.spawn} selected={selectionId === '__spawn'} />}
+      {floor.spawn && <SpawnShape spawn={floor.spawn} selected={sel.has('__spawn')} />}
     </g>
   );
 });
@@ -549,7 +613,20 @@ function frameOuterWidth(it: FrameItem, art?: { width: number; height: number })
   return frameDims(it.frameStyle, it.width, it.width / aspect, it.mat).outerW;
 }
 
-function WallItemShape({ item, selected, thumb, art }: { item: WallItem; selected: boolean; thumb?: string; art?: { width: number; height: number } }) {
+/** 도면 위 감상 순서 번호 */
+function OrderBadge({ n, x, y }: { n?: number; x: number; y: number }) {
+  if (!n) return null;
+  return (
+    <g transform={`translate(${x} ${y})`} className="plan-order" pointerEvents="none">
+      <circle r={0.2} />
+      <text y={0.01} textAnchor="middle" dominantBaseline="middle">
+        {n}
+      </text>
+    </g>
+  );
+}
+
+function WallItemShape({ item, selected, thumb, art, order }: { item: WallItem; selected: boolean; thumb?: string; art?: { width: number; height: number }; order?: number }) {
   const p = wallItemPose(item);
   const angle = Math.atan2(p.rz, p.rx) * DEG;
   if (item.kind === 'elevator') {
@@ -559,6 +636,24 @@ function WallItemShape({ item, selected, thumb, art }: { item: WallItem; selecte
         <rect x={-w / 2} y={0} width={w} height={0.9} rx={0.06} className="plan-elevator__body" />
         <path d="M -0.25 0.62 L 0 0.3 L 0.25 0.62 M -0.25 0.72 L 0 1.04 L 0.25 0.72" transform="translate(0 -0.22)" className="plan-elevator__icon" />
         <rect x={-w / 2} y={0} width={w} height={0.9} className="plan-hit" />
+      </g>
+    );
+  }
+  if (item.kind === 'text') {
+    const w = item.width;
+    const label = item.title.trim() || item.body.trim();
+    return (
+      <g transform={`translate(${p.x} ${p.z}) rotate(${angle})`} data-kind="wallItem" data-id={item.id} className={`plan-item plan-text ${selected ? 'is-selected' : ''} ${label ? '' : 'is-empty'}`}>
+        <rect x={-w / 2} y={0} width={w} height={0.1} className="plan-text__bar" />
+        <g transform={`translate(0 0.55) rotate(${-angle})`}>
+          <rect x={-0.3} y={-0.3} width={0.6} height={0.6} rx={0.08} className="plan-text__badge" />
+          <text x={0} y={0.02} className="plan-text__glyph" textAnchor="middle" dominantBaseline="middle">
+            Aa
+          </text>
+          <OrderBadge n={order} x={-0.3} y={-0.3} />
+        </g>
+        <rect x={-Math.max(w, 0.8) / 2} y={-0.1} width={Math.max(w, 0.8)} height={1} className="plan-hit" />
+        {label && <title>{label.slice(0, 60)}</title>}
       </g>
     );
   }
@@ -579,14 +674,28 @@ function WallItemShape({ item, selected, thumb, art }: { item: WallItem; selecte
             <path d="M -0.12 0 H 0.12 M 0 -0.12 V 0.12" />
           </g>
         )}
+        <OrderBadge n={order} x={-0.36} y={-0.36} />
       </g>
       <rect x={-Math.max(w, 0.8) / 2} y={-0.1} width={Math.max(w, 0.8)} height={1.1} className="plan-hit" />
     </g>
   );
 }
 
-function PropShape({ prop, selected }: { prop: Prop; selected: boolean }) {
+function PropShape({ prop, selected, thumb, order }: { prop: Prop; selected: boolean; thumb?: string; order?: number }) {
   const s = PROP_SPEC[prop.type];
+  if (prop.type === 'pedestal' && prop.artworkId)
+    return (
+      <g transform={`translate(${prop.x} ${prop.z}) rotate(${-prop.rotation * DEG})`} data-kind="prop" data-id={prop.id} className={`plan-item plan-prop plan-prop--pedestal plan-prop--art ${selected ? 'is-selected' : ''}`}>
+        <rect x={-s.w / 2} y={-s.d / 2} width={s.w} height={s.d} className="plan-prop__body" />
+        {/* 작품 정면 방향 표시 */}
+        <path d={`M -0.12 ${s.d / 2 + 0.06} L 0 ${s.d / 2 + 0.2} L 0.12 ${s.d / 2 + 0.06} Z`} className="plan-prop__front" />
+        <g transform={`rotate(${prop.rotation * DEG})`}>
+          {thumb ? <image href={thumb} x={-0.21} y={-0.21} width={0.42} height={0.42} preserveAspectRatio="xMidYMid slice" clipPath="circle(0.21px)" /> : <circle r={0.12} className="plan-prop__detail" />}
+          <OrderBadge n={order} x={-0.3} y={-0.3} />
+        </g>
+        <rect x={-s.w / 2 - 0.1} y={-s.d / 2 - 0.1} width={s.w + 0.2} height={s.d + 0.35} className="plan-hit" />
+      </g>
+    );
   return (
     <g transform={`translate(${prop.x} ${prop.z}) rotate(${-prop.rotation * DEG})`} data-kind="prop" data-id={prop.id} className={`plan-item plan-prop plan-prop--${prop.type} ${selected ? 'is-selected' : ''}`}>
       {prop.type === 'plant' ? (
@@ -665,6 +774,11 @@ function renderGhost(
       if (face && existingItemOnFace(floor, face)) return null;
       return <FaceGhost floor={floor} x={hover.x} z={hover.z} width={1.1} color={ACCENT} />;
     }
+    case 'text': {
+      const face = nearestFace(floor, hover.x, hover.z);
+      if (face && existingItemOnFace(floor, face)) return null;
+      return <FaceGhost floor={floor} x={hover.x} z={hover.z} width={1.6} color="#2f6f8f" />;
+    }
     case 'elevator':
       return <FaceGhost floor={floor} x={hover.x} z={hover.z} width={ELEVATOR_WIDTH} color="#4d6bd8" />;
     case 'prop': {
@@ -674,7 +788,7 @@ function renderGhost(
       if (!isFilled(floor, i, j)) return null;
       return (
         <g opacity={0.55} pointerEvents="none">
-          <PropShape prop={{ id: '', type: o.propType, x, z, rotation: o.propRotation }} selected={false} />
+          <PropShape prop={{ id: '', type: o.propType, x, z, rotation: o.propRotation, artworkId: null, artHeight: 0 }} selected={false} />
         </g>
       );
     }

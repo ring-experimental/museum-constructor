@@ -1,32 +1,40 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { CELL, FRAME_STYLE_SPEC, PROP_SPEC, WALL_THICKNESS } from '../core/constants';
+import { CELL, FRAME_STYLE_SPEC, PEDESTAL_TOP, PROP_SPEC, WALL_THICKNESS } from '../core/constants';
 import { buildColliders, type Colliders } from '../core/collision';
 import { computeWallEdges, facingCell, isFaceValid, isFilled, mergeWallRuns, wallItemPose, type FacePose } from '../core/grid';
-import type { Artwork, Exhibition, Floor, FrameItem, FrameStyle, PropType, WallSide } from '../core/types';
-import { acquireArtworkTexture, fitTextureToAspect, releaseArtworkTexture } from './artworkTextures';
-import { frameDims, imageGeometry, matGeometry, moldingGeometry, panelGeometry, type FrameDims } from './frameGeometry';
+import { tourSequence } from '../core/tour';
+import type { Artwork, Exhibition, Floor, FrameItem, FrameStyle, Prop, PropType, TextItem, WallSide } from '../core/types';
+import { ArtworkSlot, updateSlotsLod } from './artworkSlot';
+import { frameDims, imageGeometry, matGeometry, moldingGeometry, panelGeometry } from './frameGeometry';
 import { acquireCaptionTexture, floorIndicatorTexture, releaseCaptionTexture } from './labels';
 import { LIGHTING } from './lighting';
-import { getLoadedModel, instanceModel, loadModel, type ModelName } from './models';
+import { loadArtworkModel } from './modelArtwork';
+import { getLoadedModel, instanceModel, loadModel, withoutSculpture, type ModelName } from './models';
 import { aoStripTexture, contactShadowTexture, statusTexture, wallWashTexture } from './proceduralTextures';
+import { createLightCone, createSpotLight, MAX_REAL_SPOTS, spotSpec, type SpotRequest } from './spotlights';
 import { applyTextureSet, createFloorMaterial, createWallMaterial, floorSetFor, TEXTURE_TILE } from './surfaceMaterials';
+import { createWallTextBlock, isEmptyText, wallTextInk } from './wallText';
 
 export interface BuildOptions {
   mode: 'visit' | 'preview';
-  /** 미리보기에서 강조할 항목 */
-  selectedId?: string | null;
+  /** 미리보기에서 강조할 항목들 */
+  selectedIds?: ReadonlySet<string>;
   /** 텍스처 로드 등 비동기 변화가 생겼을 때 (on-demand 렌더링용) */
   onChange?: () => void;
 }
 
-export interface FrameInfo {
+/** 관람객이 다가가 감상하는 지점 (작품 액자, 벽 글, 좌대 위 입체 작품) */
+export interface StopInfo {
   id: string;
-  item: FrameItem;
+  kind: 'frame' | 'text' | 'object';
+  item: FrameItem | TextItem | Prop;
   artwork: Artwork | null;
   pose: FacePose;
   center: THREE.Vector3;
-  dims: FrameDims;
+  /** 감상할 때 화면에 함께 담아야 하는 크기 (m, 명제표 포함) */
+  viewW: number;
+  viewH: number;
 }
 
 export interface ElevatorInfo {
@@ -41,11 +49,14 @@ export interface ElevatorInfo {
 
 export interface FloorScene {
   group: THREE.Group;
-  frames: FrameInfo[];
+  /** 감상 지점 (작품·벽 글) */
+  stops: StopInfo[];
   elevators: ElevatorInfo[];
   pickables: THREE.Object3D[];
   floorMesh: THREE.Mesh;
   colliders: Colliders;
+  /** 카메라 위치에 따라 가까운 작품만 고해상도 텍스처로 */
+  updateLod(cameraPosition: THREE.Vector3): void;
   dispose(): void;
 }
 
@@ -222,14 +233,17 @@ export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildO
   }
 
   // ── 액자 ───────────────────────────────────────────────
-  const frames: FrameInfo[] = [];
+  const stops: StopInfo[] = [];
   const pickables: THREE.Object3D[] = [];
   const moldingByStyle = new Map<FrameStyle, THREE.BufferGeometry[]>();
   const matGeos: THREE.BufferGeometry[] = [];
   const washGeos: THREE.BufferGeometry[] = [];
+  const spotWashGeos: THREE.BufferGeometry[] = [];
+  const spotRequests: SpotRequest[] = [];
   const lightMatrices: THREE.Matrix4[] = [];
   const artMap = new Map(ex.artworks.map((a) => [a.id, a]));
   const selectionBoxes: THREE.Object3D[] = [];
+  const slots: ArtworkSlot[] = [];
 
   for (const it of floor.wallItems) {
     if (it.kind !== 'frame') continue;
@@ -270,28 +284,10 @@ export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildO
     group.add(img);
     pickables.push(img);
     if (art) {
-      const src = art.source;
-      acquireArtworkTexture(src)
-        .then((tex) => {
-          if (disposed) {
-            releaseArtworkTexture(src);
-            return;
-          }
-          const fitted = fitTextureToAspect(tex, imageW / imageH);
-          imgMat.map = fitted;
-          imgMat.needsUpdate = true;
-          cleanups.push(() => {
-            if (fitted !== tex) fitted.dispose();
-            releaseArtworkTexture(src);
-          });
-          changed();
-        })
-        .catch(() => {
-          if (disposed) return;
-          imgMat.map = statusTexture('error');
-          imgMat.needsUpdate = true;
-          changed();
-        });
+      const slot = new ArtworkSlot(art.source, imgMat, imageW / imageH, new THREE.Vector3(0, 0, d.matZ).applyMatrix4(M), changed, art.media);
+      // 편집 미리보기에서는 영상을 재생하지 않고 대표 이미지만
+      if (!(art.media === 'video' && opts.mode === 'preview')) slots.push(slot);
+      cleanups.push(() => slot.dispose());
     }
 
     // 캡션 (명제표)
@@ -310,28 +306,101 @@ export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildO
       pickables.push(plaque);
     }
 
-    // 벽에 떨어지는 빛
-    const ww = d.outerW * 1.45 + 0.9;
-    const wh = d.outerH * 1.45 + 0.9;
-    const wg = new THREE.PlaneGeometry(ww, wh);
-    wg.translate(0, 0.12, 0.003);
-    wg.applyMatrix4(M);
-    washGeos.push(wg);
-
-    // 천장 스포트 조명
-    lightMatrices.push(
-      new THREE.Matrix4().compose(
-        new THREE.Vector3(pose.x + pose.nx * 1.3, H, pose.z + pose.nz * 1.3),
-        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), pose.rotY),
-        new THREE.Vector3(1, 1, 1),
-      ),
-    );
-
     const center = new THREE.Vector3(0, 0, d.matZ).applyMatrix4(M);
-    frames.push({ id: it.id, item: it, artwork: art, pose, center, dims: d });
+    const light = it.light ?? 'normal';
+    if (light !== 'off') {
+      // 벽에 떨어지는 빛 (스포트라이트는 작품 둘레로 좁고 밝게)
+      const spot = light === 'spot';
+      const ww = spot ? d.outerW * 1.2 + 0.45 : d.outerW * 1.45 + 0.9;
+      const wh = spot ? d.outerH * 1.2 + 0.45 : d.outerH * 1.45 + 0.9;
+      const wg = new THREE.PlaneGeometry(ww, wh);
+      wg.translate(0, spot ? 0.05 : 0.12, 0.003);
+      wg.applyMatrix4(M);
+      (spot ? spotWashGeos : washGeos).push(wg);
 
-    if (opts.selectedId === it.id) {
+      // 천장 트랙 조명
+      lightMatrices.push(
+        new THREE.Matrix4().compose(
+          new THREE.Vector3(pose.x + pose.nx * 1.3, H, pose.z + pose.nz * 1.3),
+          new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), pose.rotY),
+          new THREE.Vector3(1, 1, 1),
+        ),
+      );
+      if (spot) spotRequests.push({ from: new THREE.Vector3(pose.x + pose.nx * 1.3, H - 0.16, pose.z + pose.nz * 1.3), to: center.clone(), radius: Math.hypot(d.outerW, d.outerH) / 2 + 0.15 });
+    }
+
+    stops.push({ id: it.id, kind: 'frame', item: it, artwork: art, pose, center, viewW: d.outerW + (it.showCaption ? 0.9 : 0), viewH: d.outerH });
+
+    if (opts.selectedIds?.has(it.id)) {
       selectionBoxes.push(outline([-d.outerW / 2 - 0.03, -d.outerH / 2 - 0.03, 0], [d.outerW / 2 + 0.03, d.outerH / 2 + 0.03, d.depth + 0.03], M));
+    }
+  }
+
+  // ── 작품별 스포트라이트 ─────────────────────────────────
+  const spotWashGeo = merge(spotWashGeos);
+  if (spotWashGeo) {
+    const sw = new THREE.Mesh(
+      spotWashGeo,
+      new THREE.MeshBasicMaterial({
+        map: wallWashTexture(),
+        color: preset.washColor,
+        transparent: true,
+        opacity: spotSpec(ex.theme.lighting).wash,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    sw.renderOrder = 2;
+    sw.name = 'spot-wash';
+    group.add(sw);
+  }
+  spotRequests.forEach((req, k) => {
+    if (opts.mode === 'visit') group.add(createLightCone(req, preset.washColor, ex.theme.lighting));
+    // 실제 조명은 몇 개만 (많으면 셰이더가 무거워진다)
+    if (k < MAX_REAL_SPOTS) {
+      const sl = createSpotLight(req, preset.washColor, ex.theme.lighting);
+      group.add(sl, sl.target);
+      cleanups.push(() => sl.dispose());
+    }
+  });
+
+  // ── 벽 글 ─────────────────────────────────────────────
+  for (const it of floor.wallItems) {
+    if (it.kind !== 'text' || !isFaceValid(floor, it, parts)) continue;
+    const empty = isEmptyText(it);
+    if (empty && opts.mode === 'visit') continue;
+    const pose = wallItemPose(it);
+    const block = empty
+      ? createWallTextBlock({ ...it, title: '벽 글 (내용 없음)', body: '' }, '#a39e94', changed)
+      : createWallTextBlock(it, wallTextInk(it, ex.theme.wallColor), changed);
+    cleanups.push(() => block.dispose());
+    // 바닥/천장을 뚫지 않게 중심 높이 보정
+    const half = block.height / 2;
+    const y = half * 2 > H - 0.5 ? H / 2 : THREE.MathUtils.clamp(it.elevation, 0.3 + half, H - 0.2 - half);
+    const M = new THREE.Matrix4().compose(
+      new THREE.Vector3(pose.x, y, pose.z),
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), pose.rotY),
+      new THREE.Vector3(1, 1, 1),
+    );
+    const geo = new THREE.PlaneGeometry(block.width, block.height);
+    geo.translate(0, 0, 0.004);
+    const mat = new THREE.MeshStandardMaterial({ map: block.texture, transparent: true, roughness: 0.92, depthWrite: false });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.applyMatrix4(M);
+    mesh.renderOrder = 3;
+    mesh.userData = { kind: 'text', id: it.id };
+    group.add(mesh);
+    pickables.push(mesh);
+    if (!empty) {
+      const wg = new THREE.PlaneGeometry(block.width * 1.3 + 0.8, block.height * 1.3 + 0.8);
+      wg.translate(0, 0.08, 0.003);
+      wg.applyMatrix4(M);
+      washGeos.push(wg);
+      const center = new THREE.Vector3(0, 0, 0.004).applyMatrix4(M);
+      stops.push({ id: it.id, kind: 'text', item: it, artwork: null, pose, center, viewW: block.width + 0.3, viewH: block.height + 0.3 });
+    }
+    if (opts.selectedIds?.has(it.id)) {
+      selectionBoxes.push(outline([-block.width / 2 - 0.05, -half - 0.05, 0], [block.width / 2 + 0.05, half + 0.05, 0.04], M));
     }
   }
 
@@ -369,6 +438,43 @@ export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildO
     group.add(wash);
   }
 
+  // ── 좌대 위 입체 작품 ──────────────────────────────────
+  function addSculpture(p: Prop, art: Artwork) {
+    const holder = new THREE.Group();
+    holder.position.set(p.x, PEDESTAL_TOP, p.z);
+    holder.rotation.y = p.rotation;
+    holder.userData = { kind: 'object', id: p.id };
+    group.add(holder);
+    // 모델이 로드되기 전에도 클릭되도록 보이지 않는 판정 상자
+    const hit = new THREE.Mesh(new THREE.BoxGeometry(0.6, PEDESTAL_TOP + p.artHeight, 0.6), new THREE.MeshBasicMaterial());
+    hit.position.y = (p.artHeight - PEDESTAL_TOP) / 2;
+    hit.visible = false;
+    holder.add(hit);
+    pickables.push(holder);
+    void loadArtworkModel(art.source)
+      .then((tpl) => {
+        if (disposed) return;
+        const obj = tpl.clone(true);
+        obj.traverse((o) => (o.userData.shared = true));
+        obj.scale.setScalar(p.artHeight);
+        holder.add(obj);
+        changed();
+      })
+      .catch(() => {
+        if (disposed) return;
+        // 모델을 못 읽으면 자리 표시
+        const ph = new THREE.Mesh(new THREE.BoxGeometry(0.3, p.artHeight, 0.3), new THREE.MeshStandardMaterial({ color: '#c9c3b8', roughness: 0.8 }));
+        ph.position.y = p.artHeight / 2;
+        holder.add(ph);
+        changed();
+      });
+    const s = Math.sin(p.rotation);
+    const c = Math.cos(p.rotation);
+    const pose: FacePose = { x: p.x, z: p.z, nx: s, nz: c, rx: c, rz: -s, rotY: p.rotation };
+    const center = new THREE.Vector3(p.x, PEDESTAL_TOP + p.artHeight / 2, p.z);
+    stops.push({ id: p.id, kind: 'object', item: p, artwork: art, pose, center, viewW: Math.max(0.8, p.artHeight * 1.2), viewH: p.artHeight + 0.5 });
+  }
+
   // ── 비동기 모델 (조명, 소품, 엘리베이터) ────────────────
   const whenModel = (name: ModelName, fn: (tpl: THREE.Object3D) => void) => {
     const tpl = getLoadedModel(name);
@@ -389,8 +495,8 @@ export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildO
     });
   }
 
-  // 소품
-  const byType = new Map<PropType, THREE.Matrix4[]>();
+  // 소품 (입체 작품을 올린 좌대는 기본 장식 조각을 뺀 모델로)
+  const byType = new Map<PropType | 'plinth', THREE.Matrix4[]>();
   const shadowGeos: THREE.BufferGeometry[] = [];
   for (const p of floor.props) {
     const m = new THREE.Matrix4().compose(
@@ -398,15 +504,18 @@ export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildO
       new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), p.rotation),
       new THREE.Vector3(1, 1, 1),
     );
-    if (!byType.has(p.type)) byType.set(p.type, []);
-    byType.get(p.type)!.push(m);
+    const art = p.type === 'pedestal' && p.artworkId ? artMap.get(p.artworkId) : undefined;
+    const key = art?.media === 'model' ? 'plinth' : p.type;
+    if (!byType.has(key)) byType.set(key, []);
+    byType.get(key)!.push(m);
+    if (art?.media === 'model') addSculpture(p, art);
     const spec = PROP_SPEC[p.type];
     const sg = new THREE.PlaneGeometry(spec.w * 1.25 + 0.2, spec.d * 1.25 + 0.2);
     sg.rotateX(-Math.PI / 2);
     sg.translate(0, 0.006, 0);
     sg.applyMatrix4(m);
     shadowGeos.push(sg);
-    if (opts.selectedId === p.id) {
+    if (opts.selectedIds?.has(p.id)) {
       selectionBoxes.push(outline([-spec.w / 2, 0, -spec.d / 2], [spec.w / 2, 1.2, spec.d / 2], m));
     }
   }
@@ -418,8 +527,8 @@ export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildO
     group.add(sh);
   }
   for (const [type, mats] of byType) {
-    whenModel(PROP_MODEL[type], (tpl) => {
-      const inst = instanceModel(tpl, mats);
+    whenModel(type === 'plinth' ? 'pedestal' : PROP_MODEL[type], (tpl) => {
+      const inst = instanceModel(type === 'plinth' ? withoutSculpture(tpl) : tpl, mats);
       inst.name = `props:${type}`;
       group.add(inst);
     });
@@ -467,7 +576,7 @@ export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildO
         holder.add(plane);
       }
     });
-    if (opts.selectedId === it.id) {
+    if (opts.selectedIds?.has(it.id)) {
       selectionBoxes.push(outline([-1, 0, 0], [1, 2.75, 0.15], new THREE.Matrix4().compose(holder.position, holder.quaternion, new THREE.Vector3(1, 1, 1))));
     }
   }
@@ -478,6 +587,14 @@ export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildO
   }
 
   const colliders = buildColliders(floor, runs);
+
+  // 감상 순서대로 정렬 (순서 밖 항목은 뒤로)
+  const rank = new Map(tourSequence(floor).map((id, k) => [id, k]));
+  stops.sort((a, b) => (rank.get(a.id) ?? 1e6) - (rank.get(b.id) ?? 1e6));
+
+  const updateLod = (cam: THREE.Vector3) => {
+    if (!disposed && slots.length) updateSlotsLod(slots, cam);
+  };
 
   const dispose = () => {
     if (disposed) return;
@@ -493,7 +610,7 @@ export function buildFloorScene(ex: Exhibition, floorIndex: number, opts: BuildO
     group.removeFromParent();
   };
 
-  return { group, frames, elevators, pickables, floorMesh, colliders, dispose };
+  return { group, stops, elevators, pickables, floorMesh, colliders, updateLod, dispose };
 }
 
 /** 미리보기 선택 강조용 외곽선 박스 */

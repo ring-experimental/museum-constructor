@@ -1,4 +1,6 @@
+import { collectBlobIds, remapBlobIds } from '../core/blobs';
 import { uid } from '../core/ids';
+import { migrateExhibition, SchemaError } from '../core/schema';
 import type { Exhibition, ExhibitionSummary } from '../core/types';
 import { getDB } from './db';
 import { imageRepo } from './imageRepo';
@@ -40,7 +42,16 @@ class IndexedDBExhibitionRepository implements ExhibitionRepository {
 
   async get(id: string) {
     const db = await getDB();
-    return db.get('exhibitions', id);
+    const raw = await db.get('exhibitions', id);
+    if (!raw) return undefined;
+    try {
+      // 옛 버전 문서도 현재 구조로 읽는다 (저장은 편집할 때 자연스럽게 새 버전으로)
+      return migrateExhibition(raw);
+    } catch (e) {
+      if (e instanceof SchemaError) console.error(`[exhibitionRepo] ${id}: ${e.message}`);
+      else throw e;
+      return undefined;
+    }
   }
 
   async save(doc: Exhibition) {
@@ -66,12 +77,13 @@ class IndexedDBExhibitionRepository implements ExhibitionRepository {
     copy.title = `${src.title} (사본)`;
     copy.status = 'draft';
     copy.createdAt = copy.updatedAt = Date.now();
-    for (const art of copy.artworks) {
-      if (art.source.kind === 'upload') {
-        const newId = await imageRepo.copy(art.source.blobId, copy.id);
-        if (newId) art.source = { kind: 'upload', blobId: newId };
-      }
+    // 업로드 파일(이미지·영상·모델·오디오)도 새 전시 소속으로 복사
+    const map = new Map<string, string>();
+    for (const blobId of collectBlobIds(copy)) {
+      const newId = await imageRepo.copy(blobId, copy.id);
+      if (newId) map.set(blobId, newId);
     }
+    remapBlobIds(copy, map);
     await this.save(copy);
     return copy;
   }

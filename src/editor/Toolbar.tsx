@@ -1,4 +1,4 @@
-import { ArrowUpDown, BrickWall, Eraser, Frame, MousePointer2, Armchair, Navigation, SquareDashed } from 'lucide-react';
+import { ArrowUpDown, BrickWall, Eraser, Frame, MousePointer2, Armchair, Navigation, SquareDashed, Type } from 'lucide-react';
 import { PROP_SPEC } from '../core/constants';
 import type { PropType } from '../core/types';
 import { useEditor, type Tool } from './store';
@@ -8,10 +8,11 @@ export const TOOLS: { id: Tool; label: string; key: string; icon: React.Componen
   { id: 'room', label: '공간', key: '2', icon: SquareDashed, hint: '드래그해서 바닥(방)을 칠해요. 벽은 공간 둘레에 자동으로 세워져요. 우클릭 드래그 = 지우기' },
   { id: 'wall', label: '칸막이 벽', key: '3', icon: BrickWall, hint: '격자선 위를 클릭하거나 드래그해 칸막이 벽을 세우거나 없애요.' },
   { id: 'frame', label: '액자', key: '4', icon: Frame, hint: '벽 가까이를 클릭하면 액자가 걸려요. 보관함에서 작품을 고르면 그 작품이 순서대로 걸려요.' },
-  { id: 'elevator', label: '엘리베이터', key: '5', icon: ArrowUpDown, hint: '벽을 클릭해 엘리베이터를 설치해요. 관람객이 층을 오가는 곳이에요. (층마다 1개)' },
-  { id: 'prop', label: '소품', key: '6', icon: Armchair, hint: '바닥을 클릭해 벤치·화분·조각 좌대를 놓아요. R 키로 회전.' },
-  { id: 'spawn', label: '시작 위치', key: '7', icon: Navigation, hint: '관람객이 처음 서는 곳이에요. 클릭 후 드래그하면 바라보는 방향을 정해요.' },
-  { id: 'erase', label: '지우개', key: '8', icon: Eraser, hint: '액자·소품·칸막이 벽을 클릭해서 지워요.' },
+  { id: 'text', label: '벽 글', key: '5', icon: Type, hint: '벽 가까이를 클릭해 전시 서문·섹션 제목·안내문을 붙여요. 오른쪽에서 글을 입력해요.' },
+  { id: 'elevator', label: '엘리베이터', key: '6', icon: ArrowUpDown, hint: '벽을 클릭해 엘리베이터를 설치해요. 관람객이 층을 오가는 곳이에요. (층마다 1개)' },
+  { id: 'prop', label: '소품', key: '7', icon: Armchair, hint: '바닥을 클릭해 벤치·화분·조각 좌대를 놓아요. R 키로 회전.' },
+  { id: 'spawn', label: '시작 위치', key: '8', icon: Navigation, hint: '관람객이 처음 서는 곳이에요. 클릭 후 드래그하면 바라보는 방향을 정해요.' },
+  { id: 'erase', label: '지우개', key: '9', icon: Eraser, hint: '액자·벽 글·소품·칸막이 벽을 클릭해서 지워요.' },
 ];
 
 export function Toolbar() {
@@ -72,11 +73,19 @@ export function ToolOptions() {
           <button className="btn btn--sm" onClick={() => rotateProp(Math.PI / 2)}>
             회전 (R)
           </button>
+          {propType === 'pedestal' && pendingArt?.media === 'model' && (
+            <span className="tool-options__pending">
+              올릴 입체 작품: <strong>{pendingArt.title || '무제'}</strong>
+              <button className="link-btn" onClick={() => setPending(null)}>
+                빈 좌대로
+              </button>
+            </span>
+          )}
         </>
       )}
       {tool === 'frame' && (
         <span className="tool-options__pending">
-          {pendingArt ? (
+          {pendingArt && pendingArt.media !== 'model' ? (
             <>
               다음에 걸 작품: <strong>{pendingArt.title || '무제'}</strong>
               <button className="link-btn" onClick={() => setPending(null)}>

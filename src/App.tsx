@@ -25,7 +25,7 @@ export function App() {
     <>
       {!fullscreen && <AppHeader active={route.name === 'studio' ? 'studio' : 'visit'} />}
       {route.name === 'visitList' && <VisitListPage />}
-      {route.name === 'visit' && <VisitPage key={route.id} id={route.id} initialFloor={route.floor} from={route.from} />}
+      {route.name === 'visit' && <VisitPage key={route.id} id={route.id} initialFloor={route.floor} initialArt={route.art} from={route.from} />}
       {route.name === 'studio' && <StudioListPage />}
       {route.name === 'editor' && <EditorPage key={route.id} id={route.id} />}
       {route.name === 'notFound' && (

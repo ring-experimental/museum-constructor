@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CELL, PLAYER_RADIUS, WALL_THICKNESS } from './constants';
 import { buildColliders, isPathBlocked, resolveCircle } from './collision';
-import { addPartitionLine, autoHang, createExhibitionFromTemplate, createFloor, fillRect, TEMPLATES } from './factory';
+import { addPartitionLine, autoHang, createExhibitionFromTemplate, createFloor, fillRect, newProp, TEMPLATES } from './factory';
 import { computeWallEdges, edgeKey, facePose, hasWall, invalidWallItemIds, isFaceValid, mergeWallRuns, nearestFace, orderedFaces, resolveSpawn } from './grid';
 import type { Artwork } from './types';
 
@@ -73,7 +73,7 @@ describe('collision', () => {
 
   it('pushes out of rotated props', () => {
     const f = room(3, 3);
-    f.props.push({ id: 'b', type: 'bench', x: 4, z: 4, rotation: Math.PI / 2 });
+    f.props.push({ ...newProp('bench', 4, 4, Math.PI / 2), id: 'b' });
     const col = buildColliders(f);
     // 90° 회전한 벤치는 z 방향으로 길다 → (4, 4.6) 은 벤치 안쪽
     const [x, z] = resolveCircle(4, 4.6, PLAYER_RADIUS, col);
@@ -105,7 +105,7 @@ describe('templates & auto hang', () => {
 
   it('hangs artworks on distinct valid faces', () => {
     const f = room(3, 3);
-    const arts: Artwork[] = Array.from({ length: 20 }, (_, i) => ({ id: `a${i}`, source: { kind: 'sample', index: i }, width: 4, height: 3, title: '', artist: '', year: '', description: '' }));
+    const arts: Artwork[] = Array.from({ length: 20 }, (_, i) => ({ id: `a${i}`, media: 'image', source: { kind: 'sample', index: i }, width: 4, height: 3, title: '', artist: '', year: '', description: '', audioBlobId: null }));
     const n = autoHang(f, arts);
     expect(n).toBe(orderedFaces(f).length);
     expect(n).toBe(12);

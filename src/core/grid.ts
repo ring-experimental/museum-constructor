@@ -298,20 +298,32 @@ export function invalidWallItemIds(floor: Floor): Set<string> {
   return bad;
 }
 
-/** 모든 유효 벽면을 관람 동선(중심 기준 시계방향) 순서로 반환 */
+/**
+ * 관람 동선 각도: 바닥 중심 기준 시계방향 (0 ~ 2π).
+ * 시작 위치(입구)가 중심에서 떨어져 있으면 그 방향에서 출발한다.
+ */
+export function routeAngle(floor: Floor): (x: number, z: number) => number {
+  const c = floorCentroid(floor);
+  const TAU = Math.PI * 2;
+  const raw = (x: number, z: number) => (Math.atan2(x - c.x, -(z - c.z)) + TAU) % TAU;
+  const sp = resolveSpawn(floor);
+  const a0 = Math.hypot(sp.x - c.x, sp.z - c.z) > CELL * 0.5 ? raw(sp.x, sp.z) : 0;
+  return (x, z) => (raw(x, z) - a0 + TAU) % TAU;
+}
+
+/** 모든 유효 벽면을 관람 동선(시작 위치에서 출발해 중심 기준 시계방향) 순서로 반환 */
 export function orderedFaces(floor: Floor): WallFace[] {
   const edges = computeWallEdges(floor);
   const faces: (WallFace & { angle: number; r: number })[] = [];
   const c = floorCentroid(floor);
+  const angleOf = routeAngle(floor);
   for (const e of edges) {
     for (const side of [1, -1] as WallSide[]) {
       const f = { edge: e.key, side };
       const [ci, cj] = facingCell(f);
       if (!isFilled(floor, ci, cj)) continue;
       const p = facePose(f, 0);
-      let angle = Math.atan2(p.x - c.x, -(p.z - c.z));
-      if (angle < 0) angle += Math.PI * 2;
-      faces.push({ ...f, angle, r: Math.hypot(p.x - c.x, p.z - c.z) });
+      faces.push({ ...f, angle: angleOf(p.x, p.z), r: Math.hypot(p.x - c.x, p.z - c.z) });
     }
   }
   faces.sort((a, b) => a.angle - b.angle || b.r - a.r);

@@ -1,8 +1,8 @@
-import { CELL, DEFAULT_WALL_HEIGHT, FRAME_DEFAULTS } from './constants';
+import { ART_HEIGHT_DEFAULT, CELL, DEFAULT_WALL_HEIGHT, FRAME_DEFAULTS, TEXT_DEFAULTS } from './constants';
 import { edgeKey, faceId, isFaceValid, orderedFaces, parseEdge } from './grid';
 import { uid } from './ids';
 import type { WallFace } from './grid';
-import { SCHEMA_VERSION, type Artwork, type Exhibition, type Floor, type FrameItem, type ElevatorItem } from './types';
+import { SCHEMA_VERSION, type Artwork, type Exhibition, type Floor, type FrameItem, type ElevatorItem, type Prop, type PropType, type TextItem } from './types';
 
 export function createFloor(name: string, cols = 12, rows = 10): Floor {
   return {
@@ -16,6 +16,7 @@ export function createFloor(name: string, cols = 12, rows = 10): Floor {
     wallItems: [],
     props: [],
     spawn: null,
+    tourOrder: [],
   };
 }
 
@@ -35,6 +36,14 @@ export function newFrame(face: WallFace, artworkId: string | null = null, offset
   return { id: uid('fr'), kind: 'frame', edge: face.edge, side: face.side, offset, artworkId, ...FRAME_DEFAULTS };
 }
 
+export function newText(face: WallFace, offset = 0): TextItem {
+  return { id: uid('tx'), kind: 'text', edge: face.edge, side: face.side, offset, title: '', body: '', ...TEXT_DEFAULTS };
+}
+
+export function newProp(type: PropType, x: number, z: number, rotation = 0, artworkId: string | null = null): Prop {
+  return { id: uid('pr'), type, x, z, rotation, artworkId: type === 'pedestal' ? artworkId : null, artHeight: ART_HEIGHT_DEFAULT };
+}
+
 export function newElevator(face: WallFace): ElevatorItem {
   return { id: uid('el'), kind: 'elevator', edge: face.edge, side: face.side, offset: 0 };
 }
@@ -51,6 +60,7 @@ export function blankExhibition(title: string): Exhibition {
     status: 'draft',
     coverArtworkId: null,
     theme: { wallColor: '#f4f2ee', floorStyle: 'oak', lighting: 'bright' },
+    audio: { bgmBlobId: null, bgmVolume: 0.35, tts: true },
     artworks: [],
     floors: [],
     createdAt: now,
@@ -75,7 +85,7 @@ export const TEMPLATES: TemplateDef[] = [
     build: () => {
       const f = createFloor('1F', 8, 7);
       fillRect(f, 1, 1, 6, 5);
-      f.props.push({ id: uid('pr'), type: 'bench', x: 4 * CELL, z: 3.5 * CELL, rotation: 0 });
+      f.props.push(newProp('bench', 4 * CELL, 3.5 * CELL, 0));
       f.spawn = { x: 4 * CELL, z: 5.6 * CELL, yaw: 0 };
       return [f];
     },
@@ -89,8 +99,8 @@ export const TEMPLATES: TemplateDef[] = [
       fillRect(f, 1, 1, 10, 6);
       addPartitionLine(f, 'v', 4, 1, 4);
       addPartitionLine(f, 'v', 8, 3, 6);
-      f.props.push({ id: uid('pr'), type: 'plant', x: 1.4 * CELL, z: 1.4 * CELL, rotation: 0 });
-      f.props.push({ id: uid('pr'), type: 'bench', x: 6 * CELL, z: 4 * CELL, rotation: Math.PI / 2 });
+      f.props.push(newProp('plant', 1.4 * CELL, 1.4 * CELL, 0));
+      f.props.push(newProp('bench', 6 * CELL, 4 * CELL, Math.PI / 2));
       f.spawn = { x: 2.5 * CELL, z: 6.5 * CELL, yaw: 0 };
       return [f];
     },
@@ -106,9 +116,9 @@ export const TEMPLATES: TemplateDef[] = [
       fillRect(f, 8, 1, 10, 8);
       addPartitionLine(f, 'v', 4, 1, 1);
       addPartitionLine(f, 'v', 8, 1, 1);
-      f.props.push({ id: uid('pr'), type: 'pedestal', x: 6 * CELL, z: 2 * CELL, rotation: 0 });
-      f.props.push({ id: uid('pr'), type: 'bench', x: 2.5 * CELL, z: 5 * CELL, rotation: Math.PI / 2 });
-      f.props.push({ id: uid('pr'), type: 'bench', x: 9.5 * CELL, z: 5 * CELL, rotation: Math.PI / 2 });
+      f.props.push(newProp('pedestal', 6 * CELL, 2 * CELL, 0));
+      f.props.push(newProp('bench', 2.5 * CELL, 5 * CELL, Math.PI / 2));
+      f.props.push(newProp('bench', 9.5 * CELL, 5 * CELL, Math.PI / 2));
       f.spawn = { x: 2.5 * CELL, z: 8.4 * CELL, yaw: 0 };
       return [f];
     },
@@ -121,14 +131,14 @@ export const TEMPLATES: TemplateDef[] = [
       const f1 = createFloor('1F', 10, 8);
       fillRect(f1, 1, 1, 8, 6);
       f1.wallItems.push(newElevator({ edge: edgeKey('h', center(10), 1), side: 1 }));
-      f1.props.push({ id: uid('pr'), type: 'bench', x: 5 * CELL, z: 4.2 * CELL, rotation: 0 });
+      f1.props.push(newProp('bench', 5 * CELL, 4.2 * CELL, 0));
       f1.spawn = { x: 5 * CELL, z: 2.5 * CELL, yaw: Math.PI };
       const f2 = createFloor('2F', 10, 8);
       fillRect(f2, 1, 1, 8, 6);
       f2.wallItems.push(newElevator({ edge: edgeKey('h', center(10), 1), side: 1 }));
       addPartitionLine(f2, 'h', 4, 3, 6);
-      f2.props.push({ id: uid('pr'), type: 'plant', x: 1.4 * CELL, z: 6.6 * CELL, rotation: 0 });
-      f2.props.push({ id: uid('pr'), type: 'plant', x: 8.6 * CELL, z: 6.6 * CELL, rotation: 0 });
+      f2.props.push(newProp('plant', 1.4 * CELL, 6.6 * CELL, 0));
+      f2.props.push(newProp('plant', 8.6 * CELL, 6.6 * CELL, 0));
       return [f1, f2];
     },
   },

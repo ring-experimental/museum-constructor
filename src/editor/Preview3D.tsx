@@ -5,7 +5,7 @@ import { CELL } from '../core/constants';
 import { filledCells, floorCentroid } from '../core/grid';
 import { buildFloorScene, type FloorScene } from '../three/buildFloor';
 import { Stage } from '../three/Stage';
-import { useEditor } from './store';
+import { selectedIds, toggleSelected, useEditor } from './store';
 
 /** 편집 중인 층을 위에서 내려다보는 실시간 3D 미리보기 (천장 제거) */
 export function Preview3D() {
@@ -25,8 +25,14 @@ export function Preview3D() {
     controls.minDistance = 3;
     controls.maxDistance = 120;
     controls.addEventListener('change', stage.invalidate);
-    const off = stage.onUpdate(() => {
+    let lodTimer = 0;
+    const off = stage.onUpdate((dt) => {
       if (controls.update()) stage.invalidate();
+      lodTimer -= dt;
+      if (lodTimer <= 0) {
+        lodTimer = 0.3;
+        engine.current?.scene?.updateLod(stage.camera.position);
+      }
     });
 
     // 클릭으로 액자 선택
@@ -43,7 +49,9 @@ export function Preview3D() {
       const hit = ray.intersectObjects(sc.pickables, true)[0];
       let o: THREE.Object3D | null = hit?.object ?? null;
       while (o && !o.userData.kind) o = o.parent;
-      if (o?.userData.id) useEditor.getState().select({ kind: 'wallItem', id: o.userData.id });
+      if (!o?.userData.id) return;
+      if (e.shiftKey || e.ctrlKey || e.metaKey) toggleSelected(o.userData.id);
+      else useEditor.getState().select(o.userData.kind === 'object' ? { kind: 'prop', id: o.userData.id } : { kind: 'wallItem', id: o.userData.id });
     };
     dom.addEventListener('pointerdown', onDown);
     dom.addEventListener('pointerup', onUp);
@@ -73,7 +81,7 @@ export function Preview3D() {
       e.stage.setBackground('#e7e4de');
       const sc = buildFloorScene(doc, idx, {
         mode: 'preview',
-        selectedId: selection && 'id' in selection ? selection.id : null,
+        selectedIds: new Set(selectedIds(selection)),
         onChange: e.stage.invalidate,
       });
       e.stage.scene.add(sc.group);

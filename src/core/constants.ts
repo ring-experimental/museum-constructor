@@ -1,4 +1,4 @@
-import type { FloorStyle, FrameStyle, LightingPreset, PropType } from './types';
+import type { FloorStyle, FrameLight, FrameStyle, LightingPreset, PropType, TextAlign, TextColor, TextSize } from './types';
 
 /** 그리드 한 칸 = 2m. 액자 한 점이 편하게 걸리는 벽 한 구간(bay) 크기 */
 export const CELL = 2;
@@ -17,6 +17,13 @@ export const FRAME_DEFAULTS = {
   frameStyle: 'black' as FrameStyle,
   mat: 0.08,
   showCaption: true,
+  light: 'normal' as FrameLight,
+};
+
+export const FRAME_LIGHT_SPEC: Record<FrameLight, { label: string; hint: string }> = {
+  normal: { label: '기본', hint: '전시실 조명' },
+  spot: { label: '스포트라이트', hint: '작품만 밝게 비추는 집중 조명' },
+  off: { label: '끄기', hint: '작품 위 조명 없음' },
 };
 
 export const FRAME_STYLE_SPEC: Record<
@@ -52,3 +59,23 @@ export const PROP_SPEC: Record<PropType, { label: string; w: number; d: number; 
 };
 
 export const ELEVATOR_WIDTH = 1.96;
+
+/** 조각 좌대 윗면 높이 (Blender 모델과 맞춤) */
+export const PEDESTAL_TOP = 0.95;
+export const ART_HEIGHT_DEFAULT = 0.45;
+export const ART_HEIGHT_RANGE = { min: 0.15, max: 1.2 };
+
+export const TEXT_DEFAULTS = {
+  width: 1.6,
+  elevation: 1.6,
+  size: 'M' as TextSize,
+  align: 'left' as TextAlign,
+  color: 'auto' as TextColor,
+};
+
+/** 벽 글자 크기 단계별 글자 높이 (m) */
+export const TEXT_SIZE_SPEC: Record<TextSize, { label: string; title: number; body: number }> = {
+  S: { label: '작게', title: 0.085, body: 0.032 },
+  M: { label: '보통', title: 0.13, body: 0.042 },
+  L: { label: '크게', title: 0.21, body: 0.058 },
+};

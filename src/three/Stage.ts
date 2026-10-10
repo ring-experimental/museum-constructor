@@ -8,6 +8,8 @@ export interface StageOptions {
   /** 'demand' 는 invalidate() 를 호출할 때만 렌더 (편집기 미리보기용) */
   renderMode: 'always' | 'demand';
   fov?: number;
+  /** VR(WebXR) 관람 허용 */
+  xr?: boolean;
 }
 
 /** 렌더러 + 씬 + 조명 + 리사이즈 + 렌더 루프 */
@@ -15,6 +17,8 @@ export class Stage {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
   readonly camera: THREE.PerspectiveCamera;
+  /** 카메라를 담는 받침대. VR 에서는 머리 위치를 기기가 정하므로 이동·회전은 받침대로 한다 */
+  readonly rig = new THREE.Group();
   private readonly hemi = new THREE.HemisphereLight();
   private readonly sun = new THREE.DirectionalLight('#ffffff', 0.5);
   private readonly env: THREE.Texture;
@@ -41,6 +45,13 @@ export class Stage {
 
     this.camera = new THREE.PerspectiveCamera(opts.fov ?? 62, 1, 0.05, 400);
     this.camera.rotation.order = 'YXZ';
+    this.rig.name = 'camera-rig';
+    this.rig.add(this.camera);
+    this.scene.add(this.rig);
+    if (opts.xr) {
+      this.renderer.xr.enabled = true;
+      this.renderer.xr.setReferenceSpaceType('local-floor');
+    }
 
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
@@ -84,6 +95,8 @@ export class Stage {
   };
 
   resize() {
+    // VR 표시 중에는 기기가 크기를 정한다
+    if (this.renderer.xr.isPresenting) return;
     const w = Math.max(1, this.container.clientWidth);
     const h = Math.max(1, this.container.clientHeight);
     this.renderer.setSize(w, h, false);

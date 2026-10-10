@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { canvasFont } from './canvasText';
 
 const cache = new Map<string, { tex: THREE.CanvasTexture; refs: number }>();
 
@@ -37,7 +38,7 @@ export function acquireCaptionTexture(title: string, artist: string, year: strin
   g.fillStyle = '#fbfaf7';
   g.fillRect(0, 0, W, H);
   g.fillStyle = '#16161a';
-  g.font = '700 40px Pretendard, system-ui, sans-serif';
+  g.font = canvasFont(700, 40);
   const titleLines = wrap(g, title || '무제', W - 64, 2);
   let y = 72;
   for (const l of titleLines) {
@@ -45,14 +46,14 @@ export function acquireCaptionTexture(title: string, artist: string, year: strin
     y += 50;
   }
   g.fillStyle = '#4a4a50';
-  g.font = '500 30px Pretendard, system-ui, sans-serif';
+  g.font = canvasFont(500, 30);
   if (artist) {
     g.fillText(wrap(g, artist, W - 64, 1)[0] ?? '', 32, y + 8);
     y += 44;
   }
   if (year) {
     g.fillStyle = '#7a7a80';
-    g.font = '400 28px Pretendard, system-ui, sans-serif';
+    g.font = canvasFont(400, 28);
     g.fillText(year, 32, y + 8);
   }
   const tex = new THREE.CanvasTexture(c);
@@ -84,7 +85,7 @@ export function floorIndicatorTexture(label: string): THREE.CanvasTexture {
   g.fillStyle = '#0d0d0f';
   g.fillRect(0, 0, 256, 96);
   g.fillStyle = '#ffb347';
-  g.font = '700 60px Pretendard, system-ui, sans-serif';
+  g.font = canvasFont(700, 60);
   g.textAlign = 'center';
   g.textBaseline = 'middle';
   g.fillText(label, 128, 52);

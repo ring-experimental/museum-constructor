@@ -1,15 +1,16 @@
 import { ArrowLeft, Columns2, Footprints, Globe, Lock, Plus, Redo2, Square, Box, Undo2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from '../components/Toast';
+import { collectBlobIds } from '../core/blobs';
 import { imageRepo } from '../storage/imageRepo';
 import { exhibitionRepo } from '../storage/exhibitionRepo';
 import { href, navigate } from '../router';
-import { addArtworksFromFiles, addFloor, deleteSelection } from '../editor/actions';
+import { addArtworksFromFiles, addFloor, deleteSelection, nudgeSelectedProps, rotateSelectedProps } from '../editor/actions';
 import { ArtworkLibrary } from '../editor/ArtworkLibrary';
 import { Inspector } from '../editor/Inspector';
 import { PlanCanvas } from '../editor/PlanCanvas';
 import { Preview3D } from '../editor/Preview3D';
-import { useEditor, type ViewLayout } from '../editor/store';
+import { currentFloor, selectedIds, selectionFromIds, useEditor, type ViewLayout } from '../editor/store';
 import { TOOLS, Toolbar, ToolOptions } from '../editor/Toolbar';
 
 type SaveState = 'saved' | 'saving' | 'error';
@@ -30,7 +31,7 @@ export function EditorPage({ id }: { id: string }) {
       if (!d) return setMissing(true);
       lastSaved.current = d;
       load(d);
-      const refs = new Set(d.artworks.flatMap((a) => (a.source.kind === 'upload' ? [a.source.blobId] : [])));
+      const refs = new Set(collectBlobIds(d));
       const stored = await imageRepo.listByExhibition(d.id);
       for (const s of stored) if (!refs.has(s.id)) await imageRepo.remove(s.id);
     });
@@ -92,6 +93,16 @@ export function EditorPage({ id }: { id: string }) {
         st.redo();
         return;
       }
+      if (mod && e.code === 'KeyA') {
+        // 현재 층의 벽 항목·소품 전체 선택
+        e.preventDefault();
+        const f = currentFloor(st);
+        if (f) {
+          st.setTool('select');
+          st.select(selectionFromIds(f, [...f.wallItems.map((w) => w.id), ...f.props.map((p) => p.id)]));
+        }
+        return;
+      }
       if (mod) return;
       const tool = TOOLS.find((x) => x.key === e.key);
       if (tool) {
@@ -112,32 +123,22 @@ export function EditorPage({ id }: { id: string }) {
           deleteSelection();
           break;
         case 'KeyR': {
-          if (st.selection?.kind === 'prop') {
-            const pid = st.selection.id;
-            st.mutateFloor((f) => {
-              const p = f.props.find((x) => x.id === pid);
-              if (p) p.rotation = (p.rotation + Math.PI / 2) % (Math.PI * 2);
-            });
-          } else st.rotateProp(Math.PI / 2);
+          if (st.selection?.kind === 'prop' || st.selection?.kind === 'multi') rotateSelectedProps();
+          else st.rotateProp(Math.PI / 2);
           break;
         }
         case 'ArrowLeft':
         case 'ArrowRight':
         case 'ArrowUp':
         case 'ArrowDown': {
-          if (st.selection?.kind !== 'prop') return;
+          const f = currentFloor(st);
+          const ids = new Set(selectedIds(st.selection));
+          if (!f || !f.props.some((p) => ids.has(p.id))) return;
           e.preventDefault();
           const step = e.shiftKey ? 0.5 : 0.1;
           const dx = e.code === 'ArrowLeft' ? -step : e.code === 'ArrowRight' ? step : 0;
           const dz = e.code === 'ArrowUp' ? -step : e.code === 'ArrowDown' ? step : 0;
-          const pid = st.selection.id;
-          st.mutateFloor((f) => {
-            const p = f.props.find((x) => x.id === pid);
-            if (p) {
-              p.x = Math.round((p.x + dx) * 100) / 100;
-              p.z = Math.round((p.z + dz) * 100) / 100;
-            }
-          });
+          nudgeSelectedProps(dx, dz);
           break;
         }
       }

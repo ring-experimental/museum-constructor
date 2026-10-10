@@ -78,13 +78,21 @@ export function Minimap({
       g.stroke();
       for (const it of items) {
         const p = wallItemPose(it);
-        const half = it.kind === 'frame' ? it.width / 2 : 0.9;
-        g.strokeStyle = it.kind === 'frame' ? '#ff8a5c' : '#9fb4ff';
+        const half = it.kind === 'elevator' ? 0.9 : it.width / 2;
+        g.strokeStyle = it.kind === 'frame' ? '#ff8a5c' : it.kind === 'text' ? '#8fd3e8' : '#9fb4ff';
         g.lineWidth = 3;
         g.beginPath();
         g.moveTo(X(p.x - p.rx * half + p.nx * 0.25), Z(p.z - p.rz * half + p.nz * 0.25));
         g.lineTo(X(p.x + p.rx * half + p.nx * 0.25), Z(p.z + p.rz * half + p.nz * 0.25));
         g.stroke();
+      }
+      // 좌대 위 입체 작품
+      g.fillStyle = '#ffc06b';
+      for (const p of floor.props) {
+        if (p.type !== 'pedestal' || !p.artworkId) continue;
+        g.beginPath();
+        g.arc(X(p.x), Z(p.z), 3.5, 0, Math.PI * 2);
+        g.fill();
       }
       const pl = getPlayer();
       const px = X(pl.x);

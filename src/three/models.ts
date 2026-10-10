@@ -52,6 +52,7 @@ function fallback(name: ModelName): THREE.Object3D {
     case 'pedestal': {
       g.add(box(0.5, 0.95, 0.5, std('#f2f0ec', { roughness: 0.8 }), 0, 0.475, 0));
       const sc = new THREE.Mesh(new THREE.TorusKnotGeometry(0.1, 0.035, 96, 12), std('#8c6239', { metalness: 1, roughness: 0.3 }));
+      sc.name = 'Sculpture';
       sc.position.y = 1.12;
       g.add(sc);
       break;
@@ -121,6 +122,23 @@ export function preloadModels() {
 /** 이미 로드된 모델 (없으면 null) */
 export function getLoadedModel(name: ModelName): THREE.Object3D | null {
   return ready.get(name) ?? null;
+}
+
+const plinthCache = new WeakMap<THREE.Object3D, THREE.Object3D>();
+
+/** 기본 장식 조각을 뺀 좌대 (사용자 입체 작품을 올릴 때) */
+export function withoutSculpture(template: THREE.Object3D): THREE.Object3D {
+  let c = plinthCache.get(template);
+  if (!c) {
+    c = template.clone(true);
+    const remove: THREE.Object3D[] = [];
+    c.traverse((o) => {
+      if (/sculpt/i.test(o.name)) remove.push(o);
+    });
+    remove.forEach((o) => o.removeFromParent());
+    plinthCache.set(template, c);
+  }
+  return c;
 }
 
 /**

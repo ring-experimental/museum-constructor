@@ -2,46 +2,52 @@ import { Link2, Upload } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { ArtworkImage } from '../components/ArtworkImage';
 import { Modal } from '../components/Modal';
-import { addArtworkFromUrl, addArtworksFromFiles, usageMap } from './actions';
+import type { ArtworkMedia } from '../core/types';
+import { acceptFor, addArtworkFromUrl, addArtworksFromFiles, usageMap } from './actions';
 import { useEditor } from './store';
 
-export function ArtworkPicker({ onPick, onClose }: { onPick: (id: string) => void; onClose: () => void }) {
+export function ArtworkPicker({ onPick, onClose, media = ['image', 'video', 'model'] }: { onPick: (id: string) => void; onClose: () => void; media?: ArtworkMedia[] }) {
   const doc = useEditor((s) => s.doc)!;
   const fileRef = useRef<HTMLInputElement>(null);
   const [urlOpen, setUrlOpen] = useState(false);
   const used = usageMap(doc);
+  const onlyModels = media.length === 1 && media[0] === 'model';
+  const list = doc.artworks.filter((a) => media.includes(a.media));
   return (
-    <Modal title="걸 작품 고르기" onClose={onClose} wide>
+    <Modal title={onlyModels ? '좌대에 올릴 입체 작품 고르기' : '걸 작품 고르기'} onClose={onClose} wide>
       <div className="row">
         <button className="btn btn--primary btn--sm" onClick={() => fileRef.current?.click()}>
-          <Upload size={15} /> 새 사진 업로드
+          <Upload size={15} /> {onlyModels ? '3D 모델(.glb) 업로드' : '새 작품 업로드'}
         </button>
-        <button className="btn btn--sm" onClick={() => setUrlOpen(true)}>
-          <Link2 size={15} /> URL로 추가
-        </button>
+        {media.includes('image') && (
+          <button className="btn btn--sm" onClick={() => setUrlOpen(true)}>
+            <Link2 size={15} /> URL로 추가
+          </button>
+        )}
         <input
           ref={fileRef}
           type="file"
-          accept="image/*"
+          accept={acceptFor(media)}
           hidden
           onChange={async (e) => {
             const files = e.target.files;
             if (!files?.length) return;
-            const added = await addArtworksFromFiles(files);
+            const added = (await addArtworksFromFiles(files)).filter((a) => media.includes(a.media));
             e.target.value = '';
             if (added[0]) onPick(added[0].id);
           }}
         />
       </div>
-      {doc.artworks.length === 0 ? (
-        <p className="muted">보관함이 비어 있어요. 사진을 업로드하거나 URL로 추가하세요.</p>
+      {list.length === 0 ? (
+        <p className="muted">{onlyModels ? '보관함에 입체 작품이 없어요. GLB 3D 모델 파일을 업로드하세요.' : '보관함이 비어 있어요. 사진을 업로드하거나 URL로 추가하세요.'}</p>
       ) : (
         <div className="picker-grid">
-          {doc.artworks.map((a) => (
+          {list.map((a) => (
             <button key={a.id} className="picker-item" onClick={() => onPick(a.id)}>
               <ArtworkImage source={a.source} />
               <span>{a.title || '무제'}</span>
-              {used.get(a.id) ? <em>걸림 {used.get(a.id)}</em> : null}
+              {used.get(a.id) ? <em>{a.media === 'model' ? '올림' : '걸림'} {used.get(a.id)}</em> : null}
+              {a.media !== 'image' && <b className="media-badge">{a.media === 'model' ? '3D' : '영상'}</b>}
             </button>
           ))}
         </div>

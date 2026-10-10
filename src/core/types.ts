@@ -6,7 +6,13 @@
 
 export type ID = string;
 
-export const SCHEMA_VERSION = 1;
+/**
+ * 문서 구조 버전. 구조를 바꾸면 올리고 core/schema.ts 의 migrateExhibition 에 변환을 추가한다.
+ *  v1 — 첫 프로토타입
+ *  v2 — 벽 글(text), 층별 감상 순서(tourOrder), 작품 종류(media), 좌대 위 입체 작품,
+ *       오디오(작품 해설 녹음, 배경 음악), 작품별 조명(light)
+ */
+export const SCHEMA_VERSION = 2;
 
 export type ExhibitionStatus = 'draft' | 'published';
 
@@ -24,16 +30,22 @@ export type ArtworkSource =
   | { kind: 'url'; url: string }
   | { kind: 'sample'; index: number };
 
+/** 작품 종류: 사진·그림(벽), 영상(벽 액자에서 재생), 입체(조각 좌대에 올리는 3D 모델, GLB) */
+export type ArtworkMedia = 'image' | 'video' | 'model';
+
 export interface Artwork {
   id: ID;
+  media: ArtworkMedia;
   source: ArtworkSource;
-  /** 원본 이미지 픽셀 크기 (비율 계산용) */
+  /** 원본 이미지 픽셀 크기 (비율 계산용). 입체 작품은 미리보기 이미지 크기 */
   width: number;
   height: number;
   title: string;
   artist: string;
   year: string;
   description: string;
+  /** 작품 해설 녹음 (업로드한 오디오 파일). 없으면 설명을 음성 합성으로 읽어 준다 */
+  audioBlobId: ID | null;
 }
 
 /**
@@ -47,6 +59,8 @@ export type EdgeKey = string;
 export type WallSide = 1 | -1;
 
 export type FrameStyle = 'none' | 'black' | 'white' | 'oak' | 'brass';
+/** 작품 조명: 기본(천장 조명), 스포트라이트(집중 조명), 끄기 */
+export type FrameLight = 'normal' | 'spot' | 'off';
 
 interface WallItemBase {
   id: ID;
@@ -67,13 +81,33 @@ export interface FrameItem extends WallItemBase {
   /** 매트(passe-partout) 폭 (m) */
   mat: number;
   showCaption: boolean;
+  light: FrameLight;
 }
 
 export interface ElevatorItem extends WallItemBase {
   kind: 'elevator';
 }
 
-export type WallItem = FrameItem | ElevatorItem;
+export type TextSize = 'S' | 'M' | 'L';
+export type TextAlign = 'left' | 'center';
+/** 'auto' = 벽 색 밝기에 따라 어두운/밝은 글씨 자동 선택 */
+export type TextColor = 'auto' | 'dark' | 'light';
+
+/** 벽에 직접 붙이는 글 (전시 서문, 섹션 제목, 안내문) */
+export interface TextItem extends WallItemBase {
+  kind: 'text';
+  title: string;
+  body: string;
+  /** 글이 차지하는 가로 폭 (m). 세로는 글 양에 따라 결정 */
+  width: number;
+  /** 글 블록 중심 높이 (m) */
+  elevation: number;
+  size: TextSize;
+  align: TextAlign;
+  color: TextColor;
+}
+
+export type WallItem = FrameItem | ElevatorItem | TextItem;
 
 export type PropType = 'bench' | 'plant' | 'pedestal';
 
@@ -84,6 +118,10 @@ export interface Prop {
   z: number;
   /** 라디안 */
   rotation: number;
+  /** 조각 좌대 위에 올린 입체 작품 (좌대에만 쓰임) */
+  artworkId: ID | null;
+  /** 좌대 위 작품의 높이 (m) */
+  artHeight: number;
 }
 
 export interface Spawn {
@@ -106,6 +144,17 @@ export interface Floor {
   wallItems: WallItem[];
   props: Prop[];
   spawn: Spawn | null;
+  /** 큐레이터가 정한 감상 순서 (벽 항목 id). 비어 있으면 자동 순서 */
+  tourOrder: ID[];
+}
+
+export interface ExhibitionAudio {
+  /** 배경 음악 (업로드한 오디오 파일) */
+  bgmBlobId: ID | null;
+  /** 배경 음악 음량 0..1 */
+  bgmVolume: number;
+  /** 녹음이 없는 작품·벽 글을 음성 합성(TTS)으로 읽어 줄지 */
+  tts: boolean;
 }
 
 export interface Exhibition {
@@ -118,6 +167,7 @@ export interface Exhibition {
   status: ExhibitionStatus;
   coverArtworkId: ID | null;
   theme: ExhibitionTheme;
+  audio: ExhibitionAudio;
   artworks: Artwork[];
   floors: Floor[];
   createdAt: number;
