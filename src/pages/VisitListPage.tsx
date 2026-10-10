@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { ArtworkImage } from '../components/ArtworkImage';
 import { formatDate, useExhibitionList } from '../components/useExhibitions';
 import type { ExhibitionSummary } from '../core/types';
+import { publicUrl } from '../publicUrl';
 import { href } from '../router';
 
 export function VisitListPage() {
@@ -79,7 +80,7 @@ function HeroVisual() {
   if (!ok) return null;
   return (
     <div className="hero__visual" aria-hidden>
-      <img src="/assets/brand/hero.jpg" alt="" onError={() => setOk(false)} />
+      <img src={publicUrl('assets/brand/hero.jpg')} alt="" onError={() => setOk(false)} />
     </div>
   );
 }

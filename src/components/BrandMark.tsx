@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { publicUrl } from '../publicUrl';
 
 /**
  * 로고 슬롯. public/assets/brand/logo.svg 가 있으면 사용하고,
@@ -12,5 +13,5 @@ export function BrandMark({ size = 28 }: { size?: number }) {
         M
       </span>
     );
-  return <img className="brand__logo" src="/assets/brand/logo.svg" alt="" width={size} height={size} onError={() => setFailed(true)} />;
+  return <img className="brand__logo" src={publicUrl('assets/brand/logo.svg')} alt="" width={size} height={size} onError={() => setFailed(true)} />;
 }

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { FLOOR_STYLE_SPEC } from '../core/constants';
 import type { FloorStyle } from '../core/types';
+import { publicUrl } from '../publicUrl';
 
 /**
  * 외부 제작 PBR 텍스처 슬롯.
@@ -24,7 +25,7 @@ const texCache = new Map<string, Promise<THREE.Texture | null>>();
 const loader = new THREE.TextureLoader();
 
 function loadOptional(set: TextureSet, kind: MapKind): Promise<THREE.Texture | null> {
-  const url = `/assets/textures/${set}/${kind}.jpg`;
+  const url = publicUrl(`assets/textures/${set}/${kind}.jpg`);
   let p = texCache.get(url);
   if (!p) {
     p = loader

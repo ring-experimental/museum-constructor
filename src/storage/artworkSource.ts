@@ -1,4 +1,5 @@
 import type { ArtworkSource } from '../core/types';
+import { publicUrl } from '../publicUrl';
 import { imageRepo, loadImg } from './imageRepo';
 
 /**
@@ -39,7 +40,7 @@ export const LEGACY_SAMPLE_TITLES = [
   '마지막 빛',
 ];
 
-export const sampleFileUrl = (index: number) => `/assets/samples/sample-${String(index + 1).padStart(2, '0')}.jpg`;
+export const sampleFileUrl = (index: number) => publicUrl(`assets/samples/sample-${String(index + 1).padStart(2, '0')}.jpg`);
 
 const sampleResolved = new Map<number, Promise<string>>();
 

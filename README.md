@@ -16,6 +16,10 @@ npm run build      # 타입체크 + 프로덕션 빌드 (dist/)
 
 첫 실행 시 2층짜리 **샘플 전시**가 자동으로 만들어집니다 (작품 이미지는 개발용 임시 이미지, 입구에 서문 벽 글).
 
+## 배포 (GitHub Pages)
+
+`main` 에 push 하면 GitHub Actions(`.github/workflows/deploy.yml`)가 테스트·빌드 후 **https://ring-experimental.github.io/museum-constructor/** 에 배포합니다. 빌드는 상대 경로(`base: './'`)라 어느 하위 경로에 올려도 동작하고, `public/` 파일은 `publicUrl()`(`src/publicUrl.ts`)로 불러옵니다. 서버가 없으므로 배포된 사이트에서도 전시 데이터는 각 방문자의 브라우저에만 저장됩니다.
+
 ## 편집 모드 사용법
 
 | 도구 (단축키) | 하는 일 |

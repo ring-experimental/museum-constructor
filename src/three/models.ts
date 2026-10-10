@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { publicUrl } from '../publicUrl';
 
 /**
  * Blender 로 제작한 소품 모델 (tools/blender/build_props.py → public/assets/models).
@@ -8,11 +9,11 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 export type ModelName = 'bench' | 'plant' | 'pedestal' | 'track_light' | 'elevator';
 
 const URLS: Record<ModelName, string> = {
-  bench: '/assets/models/bench.glb',
-  plant: '/assets/models/plant.glb',
-  pedestal: '/assets/models/pedestal.glb',
-  track_light: '/assets/models/track_light.glb',
-  elevator: '/assets/models/elevator.glb',
+  bench: publicUrl('assets/models/bench.glb'),
+  plant: publicUrl('assets/models/plant.glb'),
+  pedestal: publicUrl('assets/models/pedestal.glb'),
+  track_light: publicUrl('assets/models/track_light.glb'),
+  elevator: publicUrl('assets/models/elevator.glb'),
 };
 
 const loader = new GLTFLoader();
